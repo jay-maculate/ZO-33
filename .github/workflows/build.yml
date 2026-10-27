@@ -51,7 +51,11 @@ jobs:
       - name: Build zeptocore.uf2
         run: |
           make zeptocore
-          cp zeptocore.uf2 "dist/zeptocore_${ARTIFACT_SUFFIX}.uf2"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            cp zeptocore.uf2 "dist/zeptocore_zo-33_${GITHUB_REF_NAME}.uf2"
+          else
+            cp zeptocore.uf2 "dist/zeptocore_zo-33.uf2"
+          fi
       - name: Build zeptocore visualizer firmware
         # The zeptocore-visualizer target also flashes hardware; CI only builds.
         run: |
