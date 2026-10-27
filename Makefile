@@ -108,11 +108,11 @@ lib/sinewaves.h: .venv
 	.venv/bin/python lib/sinewaves.py > lib/sinewaves.h
 	clang-format -i lib/sinewaves.h
 
-lib/sinewaves2.h: .venv
+lib/sinewaves2.h: | .venv
 	.venv/bin/python lib/sinewaves2.py > lib/sinewaves2.h
 	clang-format -i lib/sinewaves2.h
 
-lib/crossfade4_441.h: .venv
+lib/crossfade4_441.h: | .venv
 	cd lib && ../.venv/bin/python crossfade4.py 64 > crossfade4_64.h
 	clang-format -i --style=google lib/crossfade4_64.h
 	cd lib && ../.venv/bin/python crossfade4.py 128 > crossfade4_128.h
@@ -144,11 +144,11 @@ lib/crossfade.h: .venv lib/crossfade4_441.h
 	cd lib && ../.venv/bin/python crossfade2.py > crossfade2.h
 	clang-format -i --style=google lib/crossfade2.h
 
-lib/transfer_saturate2.h: .venv
+lib/transfer_saturate2.h: | .venv
 	cd lib && ../.venv/bin/python transfer_saturate2.py > transfer_saturate2.h
 	clang-format -i --style=google lib/transfer_saturate2.h
 
-lib/resonantfilter_data.h: .venv
+lib/resonantfilter_data.h: | .venv
 	cd lib && ../.venv/bin/python resonantfilter.py > resonantfilter_data.h
 	clang-format -i --style=google lib/resonantfilter_data.h
 
