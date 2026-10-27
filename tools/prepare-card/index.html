@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prepare Zeptocore card</title>
+  <style>
+    body { font: 16px/1.4 system-ui, sans-serif; margin: 2rem auto; max-width: 36rem; color: #222; }
+    button { font: inherit; padding: 0.6rem 1rem; }
+    button:disabled { opacity: 0.6; }
+    progress { width: 100%; height: 1.2rem; margin: 1rem 0; }
+    .done { background: #e8f6e8; padding: 0.8rem 1rem; }
+    .err { background: #fde8e8; padding: 0.8rem 1rem; }
+    p.note { color: #444; }
+  </style>
+</head>
+<body>
+  <h1>Prepare Zeptocore card</h1>
+  <p class="note">Use Chrome or Edge. Choose the card after it has been formatted. This writes about 476 MB and replaces any existing slot files. Each slot is 20 seconds of 16-bit, 44.1 kHz mono.</p>
+  <button id="go" type="button">Select card and prepare</button>
+  <progress id="bar" max="257" value="0" hidden></progress>
+  <p id="status"></p>
+
+  <script>
+    const DATA_OFF = 88576;
+    const AUDIO = 20 * 44100 * 2;
+    const SLOT = DATA_OFF + AUDIO;
+    const BANKS = 16;
+    const SLOTS = 16;
+
+    const go = document.getElementById("go");
+    const bar = document.getElementById("bar");
+    const status = document.getElementById("status");
+
+    function wavHeader() {
+      const data = SLOT - 44;
+      const h = new Uint8Array(44);
+      const v = new DataView(h.buffer);
+      h.set([82, 73, 70, 70], 0);
+      v.setUint32(4, 36 + data, true);
+      h.set([87, 65, 86, 69, 102, 109, 116, 32], 8);
+      v.setUint32(16, 16, true);
+      v.setUint16(20, 1, true);
+      v.setUint16(22, 1, true);
+      v.setUint32(24, 44100, true);
+      v.setUint32(28, 88200, true);
+      v.setUint16(32, 2, true);
+      v.setUint16(34, 16, true);
+      h.set([100, 97, 116, 97], 36);
+      v.setUint32(40, data, true);
+      return h;
+    }
+
+    async function writeSlot(handle) {
+      const writable = await handle.createWritable();
+      const header = wavHeader();
+      const chunk = new Uint8Array(1024 * 1024);
+      await writable.write(header);
+      let left = SLOT - header.length;
+      while (left) {
+        const n = Math.min(chunk.length, left);
+        await writable.write(n === chunk.length ? chunk : chunk.subarray(0, n));
+        left -= n;
+      }
+      await writable.close();
+    }
+
+    function say(text, kind) {
+      status.className = kind || "";
+      status.textContent = text;
+    }
+
+    go.onclick = async () => {
+      if (!window.showDirectoryPicker || !window.isSecureContext) {
+        say("Open this page in Chrome or Edge from a local address. A file opened directly from disk cannot choose a card.", "err");
+        return;
+      }
+      let root;
+      try {
+        root = await showDirectoryPicker({ mode: "readwrite", id: "zeptocore-card" });
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
+        say("The card could not be selected.", "err");
+        return;
+      }
+      go.disabled = true;
+      bar.hidden = false;
+      bar.value = 0;
+      const header = wavHeader();
+      let step = 0;
+      try {
+        for (let bank = 1; bank <= BANKS; bank++) {
+          const dir = await root.getDirectoryHandle("bank" + bank, { create: true });
+          for (let slot = 0; slot < SLOTS; slot++) {
+            say("Writing bank " + bank + ", slot " + slot + ".");
+            const file = await dir.getFileHandle(slot + ".0.wav", { create: true });
+            await writeSlot(file, header);
+            step++;
+            bar.value = step;
+          }
+        }
+        say("Writing the scratch file.");
+        const reserve = await root.getDirectoryHandle("reserve", { create: true });
+        const scratch = await reserve.getFileHandle("scratch.wav", { create: true });
+        await writeSlot(scratch, header);
+        bar.value = 257;
+        say("The card is prepared. Put it in the Zeptocore and let it boot so it can write the cluster lists. The pads fill while that runs.", "done");
+        if (window.Notification && Notification.permission === "granted") {
+          new Notification("Zeptocore card prepared");
+        } else if (window.Notification && Notification.permission !== "denied") {
+          const perm = await Notification.requestPermission();
+          if (perm === "granted") new Notification("Zeptocore card prepared");
+        }
+      } catch (e) {
+        say("Preparation stopped: " + (e && e.message ? e.message : "the card write failed") + ".", "err");
+      }
+      go.disabled = false;
+    };
+  </script>
+</body>
+</html>

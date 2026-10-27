@@ -1,0 +1,7 @@
+.venv/
+build/
+build-*/
+pico-sdk/
+pico-extras/
+*.uf2
+lib/cmake/target_compile_definitions.cmake

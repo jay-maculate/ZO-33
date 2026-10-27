@@ -1,0 +1,139 @@
+name: Build Firmware
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+      - "*.*.*"
+      - "!zeptocore-visualizer-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4.2.2
+      - name: Install sox
+        run: |
+          sudo apt update
+          sudo apt install sox libsox-fmt-mp3
+      - name: Setup Hugo
+        uses: peaceiris/actions-hugo@v3.0.0
+        with:
+          hugo-version: "0.135.0"
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Set up Zig
+        uses: goto-bus-stop/setup-zig@v2.2.1
+        with:
+          version: "0.11.0"
+      - name: Setup Go
+        uses: actions/setup-go@v5.5.0
+      - name: Install Pico SDK dependencies
+        run: |
+          sudo apt update
+          sudo apt install cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential gcc clang wget tar
+      - name: Create and activate a Python virtual environment
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          uv venv .venv
+          echo "VIRTUAL_ENV=.venv" >> $GITHUB_ENV
+          echo "$PWD/.venv/bin" >> $GITHUB_PATH
+      - name: Install Python dependencies
+        run: uv pip install -r requirements.txt
+      - run: uv pip freeze
+      - name: Checkout pico-sdk
+        uses: actions/checkout@v4.2.2
+        with:
+          repository: raspberrypi/pico-sdk
+          path: pico-sdk
+          submodules: recursive
+          ref: 2.3.1
+      - name: Checkout pico-extras
+        uses: actions/checkout@v4.2.2
+        with:
+          repository: raspberrypi/pico-extras
+          path: pico-extras
+          submodules: recursive
+          ref: sdk-2.3.1
+      - name: Patch tinyusb
+        run: |
+          cmake -DPICO_SDK_PATH="$GITHUB_WORKSPACE/pico-sdk" -P lib/cmake/patch_tinyusb.cmake
+      - name: Check SDK upgrade integration
+        run: python3 test/sdk_upgrade/run.py
+      - name: Set PICO_SDK_PATH
+        run: echo "PICO_SDK_PATH=$GITHUB_WORKSPACE/pico-sdk" >> $GITHUB_ENV
+      - name: Prepare artifact filenames
+        run: |
+          mkdir -p dist
+          echo "ARTIFACT_SUFFIX=${GITHUB_REF_NAME//\//-}" >> $GITHUB_ENV
+      - name: Build zeptocore.uf2
+        run: |
+          make zeptocore
+          cp zeptocore.uf2 "dist/zeptocore_${ARTIFACT_SUFFIX}.uf2"
+      - name: Build zeptocore visualizer firmware
+        # The zeptocore-visualizer target also flashes hardware; CI only builds.
+        run: |
+          make zeptocore ZEPTOCORE_VISUALIZER=ON
+          cp zeptocore_visualizer.uf2 "dist/zeptocore_${ARTIFACT_SUFFIX}_visualizer.uf2"
+      - name: Build zeptocore_256.uf2
+        run: |
+          make zeptocore_256
+          cp zeptocore.uf2 "dist/zeptocore_${ARTIFACT_SUFFIX}_low_latency.uf2"
+      - name: Check filesystem and audio behavior
+        run: |
+          python3 test/fatfs_seek/run.py
+          python3 test/seek_diagnostics/run.py
+          python3 test/audio_source/run.py
+      # Check flag isolation separately from the packaged visualizer firmware.
+      - name: Check visualizer build flag (default, ON, OFF)
+        run: python3 test/visualizer_build/run.py
+      - name: Check MIDI and visualizer telemetry
+        run: CC=clang python3 test/midi/run.py
+      - name: Prepare source tarball (on tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          git clone --branch "$GITHUB_REF_NAME" --depth 1 https://github.com/schollz/_core "_core-${ARTIFACT_SUFFIX}"
+          cd "_core-${ARTIFACT_SUFFIX}/core" && go mod tidy && go mod vendor
+          cd ../.. && tar -czvf "dist/_core_${ARTIFACT_SUFFIX}_src.tar.gz" "_core-${ARTIFACT_SUFFIX}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-builds
+          path: dist/*
+          if-no-files-found: ignore
+
+  release:
+    name: Create GitHub Release (on tags)
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-builds
+          path: ./dist
+
+      - name: List artifacts
+        run: ls -l ./dist
+
+      - name: Create Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

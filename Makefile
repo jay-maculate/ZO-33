@@ -1,0 +1,388 @@
+# Makefile
+export PICO_EXTRAS_PATH=$(CURDIR)/pico-extras
+PICO_SDK_VERSION := 2.3.1
+PICO_EXTRAS_VERSION := sdk-2.3.1
+export PICO_SDK_PATH=$(CURDIR)/pico-sdk
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_S),Darwin)
+NPROCS := $(shell sysctl -n hw.logicalcpu 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+else
+NPROCS := $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+endif
+MACOS_ARM_TC_VERSION ?= 14.2.1-1.1
+ifeq ($(UNAME_M),arm64)
+MACOS_ARM_TC_ARCH := arm64
+else
+MACOS_ARM_TC_ARCH := x64
+endif
+MACOS_ARM_TC_BASENAME := xpack-arm-none-eabi-gcc-$(MACOS_ARM_TC_VERSION)-darwin-$(MACOS_ARM_TC_ARCH)
+MACOS_ARM_TC_DIR := $(HOME)/.cache/_core/toolchains/xpack-arm-none-eabi-gcc-$(MACOS_ARM_TC_VERSION)
+MACOS_ARM_TC_BIN := $(MACOS_ARM_TC_DIR)/bin
+MACOS_ARM_TC_URL := https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/download/v$(MACOS_ARM_TC_VERSION)/$(MACOS_ARM_TC_BASENAME).tar.gz
+# Always pass an explicit value: a previous ON CMake cache must not opt in later builds.
+ZEPTOCORE_VISUALIZER ?= OFF
+ifeq ($(filter ON OFF,$(ZEPTOCORE_VISUALIZER)),)
+$(error ZEPTOCORE_VISUALIZER must be ON or OFF)
+endif
+VISUALIZER_SUFFIX := $(if $(filter ON,$(ZEPTOCORE_VISUALIZER)),_visualizer,)
+CORE_COMPILE_DEFINITIONS ?= $(CURDIR)/lib/cmake/target_compile_definitions.cmake
+CORE_NO_OVERCLOCK ?= OFF
+CORE_CMAKE_OPTIONS = -DZEPTOCORE_VISUALIZER=$(ZEPTOCORE_VISUALIZER) -DCORE_COMPILE_DEFINITIONS="$(CORE_COMPILE_DEFINITIONS)" -DCORE_NO_OVERCLOCK=$(CORE_NO_OVERCLOCK)
+PICOTOOL ?= picotool
+UPLOAD_UF2 ?= build/_core.uf2
+PICOTOOL_LOAD_FLAGS ?= --family rp2040 -f -x -v
+UPLOAD_TOUCH_1200 ?= 1
+UPLOAD_TOUCH_BAUD ?= 1200
+UPLOAD_TOUCH_WAIT ?= 2
+UPLOAD_MIDI_RESET ?= 1
+GOVERSION = go1.21.13
+GOBIN = $(HOME)/go/bin
+GOINSTALLPATH = $(GOBIN)/$(GOVERSION)
+
+dobuild: pico-sdk pico-extras lib/transfer_saturate2.h lib/sinewaves2.h lib/crossfade4_441.h lib/resonantfilter_data.h build
+	make -C build -j$(NPROCS)
+
+pico-sdk:
+	git clone --branch $(PICO_SDK_VERSION) --depth 1 --recurse-submodules --shallow-submodules https://github.com/raspberrypi/pico-sdk pico-sdk
+
+chowdsp:
+	sudo apt install -y lv2file
+	wget https://github.com/jatinchowdhury18/AnalogTapeModel/releases/download/v2.11.4/ChowTapeModel-Linux-x64-2.11.4.deb
+	sudo dpkg --install ChowTapeModel-Linux-x64-2.11.4.deb
+
+install_go21:
+	@if [ -x "$(GOINSTALLPATH)" ]; then \
+		echo "$(GOVERSION) is already installed."; \
+		exit 0; \
+	else \
+		echo "$(GOVERSION) is not installed."; \
+		go install golang.org/dl/$(GOVERSION)@latest; \
+		$(GOINSTALLPATH) download; \
+	fi
+
+# Select the device before configuration, including parallel Make invocations.
+zeptocore zeptocore_nooverclock: CORE_COMPILE_DEFINITIONS = $(CURDIR)/lib/cmake/zeptocore_compile_definitions.cmake
+zeptocore_128: CORE_COMPILE_DEFINITIONS = $(CURDIR)/lib/cmake/zeptocore_compile_definitions_128.cmake
+zeptocore_256: CORE_COMPILE_DEFINITIONS = $(CURDIR)/lib/cmake/zeptocore_compile_definitions_256.cmake
+zeptocore_nooverclock: CORE_NO_OVERCLOCK = ON
+
+# Sequential submakes keep upload after the successful build, even with make -j.
+.PHONY: zeptocore-visualizer
+zeptocore-visualizer:
+	$(MAKE) zeptocore ZEPTOCORE_VISUALIZER=ON
+	$(MAKE) upload-built UPLOAD_UF2=zeptocore_visualizer.uf2
+
+.PHONY: zeptocore zeptocore_128 zeptocore_256 zeptocore_nooverclock
+zeptocore zeptocore_128 zeptocore_256: pico-sdk pico-extras lib/transfer_saturate2.h lib/sinewaves2.h lib/crossfade4_441.h lib/resonantfilter_data.h build
+	cp "$(CORE_COMPILE_DEFINITIONS)" lib/cmake/target_compile_definitions.cmake
+	cp build/_core.uf2 zeptocore$(VISUALIZER_SUFFIX).uf2
+
+zeptocore_nooverclock: pico-sdk pico-extras lib/transfer_saturate2.h lib/sinewaves2.h lib/crossfade4_441.h lib/resonantfilter_data.h build
+	cp "$(CORE_COMPILE_DEFINITIONS)" lib/cmake/target_compile_definitions.cmake
+	sed -i 's/DO_OVERCLOCK=1/#DO_OVERCLOCK=1/g' lib/cmake/target_compile_definitions.cmake
+	cp build/_core.uf2 zeptocore_nooverclock$(VISUALIZER_SUFFIX).uf2
+
+
+copyzepto:
+	cp lib/cmake/zeptocore_compile_definitions.cmake lib/cmake/target_compile_definitions.cmake
+
+envs:
+	export PICO_EXTRAS_PATH=/home/zns/pico/pico-extras
+	export PICO_SDK_PATH=/home/zns/pico/pico-sdk
+
+
+wavetable: .venv
+	cd lib && ../.venv/bin/python wavetable.py > wavetable_data.h
+	clang-format -i --style=google lib/wavetable_data.h
+
+lib/biquad.h: .venv
+	cd lib && ../.venv/bin/python biquad.py > biquad.h
+
+lib/transfer_doublesine.h: .venv
+	cd lib && ../.venv/bin/python transfer_doublesine.py > transfer_doublesine.h
+	clang-format -i --style=google lib/transfer_doublesine.h
+
+
+lib/sinewaves.h: .venv
+	.venv/bin/python lib/sinewaves.py > lib/sinewaves.h
+	clang-format -i lib/sinewaves.h
+
+lib/sinewaves2.h: .venv
+	.venv/bin/python lib/sinewaves2.py > lib/sinewaves2.h
+	clang-format -i lib/sinewaves2.h
+
+lib/crossfade4_441.h: .venv
+	cd lib && ../.venv/bin/python crossfade4.py 64 > crossfade4_64.h
+	clang-format -i --style=google lib/crossfade4_64.h
+	cd lib && ../.venv/bin/python crossfade4.py 128 > crossfade4_128.h
+	clang-format -i --style=google lib/crossfade4_128.h
+	cd lib && ../.venv/bin/python crossfade4.py 160 > crossfade4_160.h
+	clang-format -i --style=google lib/crossfade4_160.h
+	cd lib && ../.venv/bin/python crossfade4.py 192 > crossfade4_192.h
+	clang-format -i --style=google lib/crossfade4_192.h
+	cd lib && ../.venv/bin/python crossfade4.py 256 > crossfade4_256.h
+	clang-format -i --style=google lib/crossfade4_256.h
+	cd lib && ../.venv/bin/python crossfade4.py 441 > crossfade4_441.h
+	clang-format -i --style=google lib/crossfade4_441.h
+
+lib/selectx2.h: .venv
+	cd lib && ../.venv/bin/python selectx2.py > selectx2.h
+	clang-format -i --style=google lib/selectx2.h
+
+lib/crossfade.h: .venv lib/crossfade4_441.h
+	cd lib && ../.venv/bin/python transfer_saturate.py > transfer_saturate.h
+	clang-format -i --style=google lib/transfer_saturate.h
+	cd lib && ../.venv/bin/python transfer_distortion.py > transfer_distortion.h
+	clang-format -i --style=google lib/transfer_distortion.h
+	cd lib && ../.venv/bin/python selectx.py > selectx.h
+	clang-format -i --style=google lib/selectx.h
+	cd lib && ../.venv/bin/python biquad.py > biquad.h
+	clang-format -i --style=google lib/biquad.h
+	cd lib && ../.venv/bin/python crossfade.py > crossfade.h
+	clang-format -i --style=google lib/crossfade.h
+	cd lib && ../.venv/bin/python crossfade2.py > crossfade2.h
+	clang-format -i --style=google lib/crossfade2.h
+
+lib/transfer_saturate2.h: .venv
+	cd lib && ../.venv/bin/python transfer_saturate2.py > transfer_saturate2.h
+	clang-format -i --style=google lib/transfer_saturate2.h
+
+lib/resonantfilter_data.h: .venv
+	cd lib && ../.venv/bin/python resonantfilter.py > resonantfilter_data.h
+	clang-format -i --style=google lib/resonantfilter_data.h
+
+
+pico-extras:
+	git clone --branch $(PICO_EXTRAS_VERSION) --depth 1 --recurse-submodules --shallow-submodules https://github.com/raspberrypi/pico-extras.git pico-extras
+
+copysamples:
+	cd dev/copysamples && go build -v
+	# sudo XDG_RUNTIME_DIR=/run/user/1000 ./dev/copysamples/copysamples -src dev/starting_samples2
+	# sudo XDG_RUNTIME_DIR=/run/user/1000 ./dev/copysamples/copysamples -src dev/starting_samples_kero
+	#sudo XDG_RUNTIME_DIR=/run/user/1000 ./dev/copysamples/copysamples -src dev/pikocore-starting
+	sudo XDG_RUNTIME_DIR=/run/user/1000 ./dev/copysamples/copysamples -src ~/Music/sdcard_zeptocore
+
+minicom:
+	cd dev/minicom && go build -v
+	./dev/minicom/minicom
+
+midicom:
+	cd dev/midicom && go build -v
+	./dev/midicom/midicom
+
+changebaud:
+	-curl localhost:7083
+
+resetpico2:
+	python3 scripts/enter_bootsel_1200.py --midi-fallback
+
+.PHONY: check_picotool enter_bootsel_1200 upload upload-built upload-legacy
+check_picotool:
+	@command -v "$(PICOTOOL)" >/dev/null 2>&1 || { \
+		echo "picotool not found. Install it first, or run make upload PICOTOOL=/path/to/picotool"; \
+		echo "macOS: brew install picotool"; \
+		exit 1; \
+	}
+
+enter_bootsel_1200:
+	@if [ "$(UPLOAD_TOUCH_1200)" != "1" ]; then \
+		echo "Skipping 1200-baud BOOTSEL touch"; \
+		exit 0; \
+	fi
+	python3 scripts/enter_bootsel_1200.py --baud "$(UPLOAD_TOUCH_BAUD)" --wait "$(UPLOAD_TOUCH_WAIT)" $(if $(filter 1,$(UPLOAD_MIDI_RESET)),--midi-fallback,--no-midi-fallback)
+
+upload: dobuild
+	$(MAKE) upload-built
+
+# Upload an already-built artifact without reconfiguring firmware.
+upload-built: check_picotool
+	@test -f "$(UPLOAD_UF2)" || { echo "$(UPLOAD_UF2) does not exist; build failed or UPLOAD_UF2 is wrong"; exit 1; }
+	$(MAKE) enter_bootsel_1200
+	$(PICOTOOL) load $(PICOTOOL_LOAD_FLAGS) "$(UPLOAD_UF2)"
+
+upload-legacy: resetpico2 changebaud dobuild
+	./dev/upload.sh
+
+bootreset: .venv dobuild
+	.venv/bin/python dev/reset_pico.py /dev/ttyACM0
+
+autoload: upload
+
+.PHONY: check-pico-dependencies
+check-pico-dependencies: pico-sdk pico-extras
+	python3 scripts/check_pico_dependencies.py "$(PICO_SDK_PATH)" "$(PICO_SDK_VERSION)" "$(PICO_EXTRAS_PATH)" "$(PICO_EXTRAS_VERSION)"
+
+.PHONY: build
+build: check-pico-dependencies
+	mkdir -p build
+	cmake -S . -B build $(CORE_CMAKE_OPTIONS)
+	make -C build -j$(NPROCS)
+	echo "build success"
+
+.PHONY: ensure_arm_toolchain build/Makefile
+ensure_arm_toolchain:
+ifeq ($(UNAME_S),Darwin)
+	@set -e; \
+	if ! command -v arm-none-eabi-gcc >/dev/null 2>&1 || [ "$$(arm-none-eabi-gcc -print-file-name=nosys.specs 2>/dev/null)" = "nosys.specs" ]; then \
+		if [ ! -x "$(MACOS_ARM_TC_BIN)/arm-none-eabi-gcc" ]; then \
+			echo "Installing local ARM GCC toolchain to $(MACOS_ARM_TC_DIR)"; \
+			mkdir -p "$(HOME)/.cache/_core/toolchains"; \
+			curl -fsSL "$(MACOS_ARM_TC_URL)" -o "$(HOME)/.cache/_core/toolchains/$(MACOS_ARM_TC_BASENAME).tar.gz"; \
+			rm -rf "$(MACOS_ARM_TC_DIR)"; \
+			tar -xzf "$(HOME)/.cache/_core/toolchains/$(MACOS_ARM_TC_BASENAME).tar.gz" -C "$(HOME)/.cache/_core/toolchains"; \
+			rm -f "$(HOME)/.cache/_core/toolchains/$(MACOS_ARM_TC_BASENAME).tar.gz"; \
+		fi; \
+	fi
+endif
+
+build/Makefile: check-pico-dependencies
+	mkdir -p build
+	@set -e; \
+	rm -f build/CMakeCache.txt; \
+	if [ -x "$(MACOS_ARM_TC_BIN)/arm-none-eabi-gcc" ]; then \
+		PATH="$(MACOS_ARM_TC_BIN):$$PATH" PICO_TOOLCHAIN_PATH="$(MACOS_ARM_TC_BIN)" cmake -S . -B build $(CORE_CMAKE_OPTIONS); \
+	else \
+		cmake -S . -B build $(CORE_CMAKE_OPTIONS); \
+	fi
+
+audio:
+	sox lib/audio/amen_5c2d11c8_beats16_bpm170.flac -c 1 --bits 16 --encoding signed-integer --endian little amen_bpm170_beats16_mono.wav
+	sox lib/audio/amen_0efedaab_beats8_bpm165.flac -c 1 --bits 16 --encoding signed-integer --endian little amen_bpm165_beats8_mono.wav
+
+audio2:
+	sox lib/audio/amen_5c2d11c8_beats16_bpm170.flac -c 2 --bits 16 --encoding signed-integer --endian little amen_bpm170_beats16_stereo.wav
+	sox lib/audio/amen_0efedaab_beats8_bpm165.flac -c 2 --bits 16 --encoding signed-integer --endian little amen_bpm165_beats8_stereo.wav
+
+# Keep SDKs, toolchains, virtual environments, captured data, and checked-in
+# generated sources (such as sinewaves2.h and transfer_saturate2.h).
+.PHONY: clean
+clean:
+	rm -rf build build-*/ test/*/build lib/test/*/build
+	rm -rf visualizer/dist visualizer/.cache sample-manager/build/
+	rm -rf docs/public
+	rm -f *.uf2
+	rm -f amen_bpm170_beats16_mono.wav amen_bpm165_beats8_mono.wav \
+		amen_bpm170_beats16_stereo.wav amen_bpm165_beats8_stereo.wav
+	rm -f lib/biquad.h lib/transfer_doublesine.h \
+		lib/selectx2.h lib/transfer_saturate.h lib/transfer_distortion.h \
+		lib/selectx.h lib/crossfade.h lib/crossfade2.h \
+		lib/crossfade4_64.h lib/crossfade4_128.h lib/crossfade4_160.h \
+		lib/crossfade4_192.h lib/crossfade4_256.h lib/crossfade4_441.h \
+		lib/resonantfilter_data.h
+	rm -f dev/audio2flash/audio2flash dev/gitread/gitread dev/bin2c/bin2c \
+		dev/copysamples/copysamples dev/minicom/minicom dev/midicom/midicom
+	rm -f core/core core_server core_windows.exe core_linux_amd64 \
+		core_macos_aarch64 core_macos_amd64 core_macos_amd642
+
+debug:
+	sudo minicom -b 115200 -o -D /dev/ttyACM0
+
+cloc:
+	cloc --exclude-list-file=dev/.clocignore --exclude-lang="make,CMake,D,Markdown,JSON,INI,Bourne Shell,TOML,TypeScript,YAML,Assembly" *
+
+ignore:
+	git status --porcelain | grep '^??' | cut -c4- >> .gitignore
+	git commit -am "update gitignore"
+
+release:
+	cd core && goreleaser release -p 32 --clean --snapshot
+
+server:
+	cd core && air
+
+web: server
+
+resetpico: .venv
+	.venv/bin/python dev/reset_pico.py
+
+versions.md:
+	cd dev/gitread && go build -v && ./gitread ../../docs/content/versions/versions.md
+
+docsbuild:
+	cd docs && hugo --cleanDestinationDir --minify
+	rm -rf core/src/server/docs
+	cp -r docs/public core/src/server/docs
+
+.PHONY: core_windows.exe
+core_windows.exe: docsbuild
+	cd core && CGO_ENABLED=1 CC="zig cc -target x86_64-windows-gnu" GOOS=windows GOARCH=amd64 go build -v -ldflags "-s -w" -o ../core_windows.exe
+
+core/MacOSX11.3.sdk:
+	cd core && wget -q https://github.com/joseluisq/macosx-sdks/releases/download/11.3/MacOSX11.3.sdk.tar.xz
+	cd core && tar -xf MacOSX11.3.sdk.tar.xz
+
+.PHONY: core_macos_aarch64
+core_macos_aarch64: install_go21 docsbuild core/MacOSX11.3.sdk
+	# https://web.archive.org/web/20230330180803/https://lucor.dev/post/cross-compile-golang-fyne-project-using-zig/
+	cd core && MACOS_MIN_VER=11.3 MACOS_SDK_PATH=$(PWD)/core/MacOSX11.3.sdk CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+	CGO_LDFLAGS="-mmacosx-version-min=$${MACOS_MIN_VER} --sysroot $${MACOS_SDK_PATH} -F/System/Library/Frameworks -L/usr/lib" \
+	CC="zig cc -target aarch64-macos -isysroot $${MACOS_SDK_PATH} -iwithsysroot /usr/include -iframeworkwithsysroot /System/Library/Frameworks" \
+	go1.21.13 build -ldflags "-s -w" -buildmode=pie -o ../core_macos_aarch64
+
+.PHONY: core_macos_amd64
+core_macos_amd64: install_go21 docsbuild core/MacOSX11.3.sdk
+	# https://web.archive.org/web/20230330180803/https://lucor.dev/post/cross-compile-golang-fyne-project-using-zig/
+	cd core && MACOS_MIN_VER=11.3 MACOS_SDK_PATH=$(PWD)/core/MacOSX11.3.sdk CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+	CGO_LDFLAGS="-mmacosx-version-min=$${MACOS_MIN_VER} --sysroot $${MACOS_SDK_PATH} -F/System/Library/Frameworks -L/usr/lib" \
+	CC="zig cc -target x86_64-macos -isysroot $${MACOS_SDK_PATH} -iwithsysroot /usr/include -iframeworkwithsysroot /System/Library/Frameworks" \
+	go1.21.13 build -ldflags "-s -w" -buildmode=pie -o ../core_macos_amd64
+
+.PHONY: core_macos_amd642
+core_macos_amd642: docsbuild
+	cd core && CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 \
+	go build -ldflags "-s -w" -buildmode=pie -o ../core_macos_amd642
+
+.PHONY: core_linux_amd64
+core_linux_amd64: docsbuild
+	cd core && CGO_ENABLED=1 CC="zig cc -target x86_64-linux-gnu" GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -v -o ../core_linux_amd64
+
+.PHONY: core_server
+core_server: docsbuild
+	cd core && go build -v -o ../core_server
+
+
+.PHONY: docs
+docs:
+	cd docs && hugo serve -D --bind 0.0.0.0
+
+.venv:
+	uv venv --python 3.11
+	uv pip install -r requirements.txt
+
+dev/madmom/.venv:
+	cd dev/madmom && uv venv
+	cd dev/madmom && . .venv/bin/activate && uv pip install -r requirements.txt
+
+# Standalone native sample preparation; separate from firmware and kiosk builds.
+.PHONY: sample-manager sample-manager-test sample-manager-run sample-manager-package
+sample-manager:
+	$(MAKE) -C sample-manager build
+sample-manager-test:
+	$(MAKE) -C sample-manager test
+sample-manager-run:
+	$(MAKE) -C sample-manager run
+sample-manager-package:
+	$(MAKE) -C sample-manager package
+
+.PHONY: sample-manager-release-macosarm sample-manager-release-macos11 sample-manager-release-linux
+sample-manager-release-macosarm:
+	$(MAKE) -C sample-manager release-macosarm
+sample-manager-release-macos11:
+	$(MAKE) -C sample-manager release-macos11
+sample-manager-release-linux:
+	$(MAKE) -C sample-manager release-linux
+
+.PHONY: rack-release-macosarm rack-release-macos11 rack-release-linux
+rack-release-macosarm:
+	$(MAKE) -C rack release-macosarm
+rack-release-macos11:
+	$(MAKE) -C rack release-macos11
+rack-release-linux:
+	$(MAKE) -C rack release-linux
+
+# Package and install the VCV Rack plugin using the SDK's platform-specific path.
+.PHONY: install
+install:
+	$(MAKE) -C rack $(if $(RACK_DIR),RACK_DIR="$(abspath $(RACK_DIR))") install
+	@echo "Installed Infinite Digits EZEPTOCORE. Restart VCV Rack to load the plugin."
