@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sample slot display</title>
+<style>
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: #141414;
+    color: #eee;
+    font: 15px/1.4 sans-serif;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+  }
+  .fit { overflow: hidden; }
+  .stage {
+    width: 676px;
+    height: 584px;
+    position: relative;
+    transform-origin: top left;
+  }
+  header { display: flex; gap: 16px; align-items: center; padding: 12px 16px; }
+  #meta { color: #9a9a9a; }
+  #play {
+    position: absolute;
+    top: 16px;
+    right: 18px;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 8px 0 8px 14px;
+    border-color: transparent transparent transparent #eee;
+    visibility: hidden;
+  }
+  #play.on { visibility: visible; }
+  button { background: #2a2a2a; color: #eee; border: 1px solid #444; padding: 6px 10px; cursor: pointer; }
+  #wave { width: 100%; max-width: 100%; min-width: 0; height: 163px; background: #0c0c0c; display: block; }
+  #steps {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 12px 16px;
+  }
+  #steps i {
+    width: 27px;
+    height: 27px;
+    border: 2px solid #9a9a9a;
+    box-sizing: border-box;
+  }
+  #steps i.on { background: #eee; }
+  #steps b {
+    width: 9px;
+    height: 9px;
+    background: #eee;
+    flex: 0 0 auto;
+  }
+  #controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+    gap: 12px;
+    padding: 0 16px 20px;
+  }
+  #filter {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    background: #0c0c0c;
+    border: 2px solid #9a9a9a;
+    box-sizing: border-box;
+  }
+  #filtercol {
+    display: grid;
+    row-gap: 6px;
+    width: 100%;
+    min-width: 0;
+  }
+  #bands {
+    position: relative;
+    height: 18px;
+    color: #9a9a9a;
+    font-size: 13px;
+  }
+  #bands span {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+  }
+  #padrow {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) 18px;
+    grid-template-rows: auto auto;
+    width: 100%;
+    margin: 0;
+    column-gap: 8px;
+    row-gap: 6px;
+  }
+  #slots {
+    grid-column: 2;
+    grid-row: 1;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    width: 100%;
+    margin: 0;
+    aspect-ratio: 1;
+  }
+  #slots i { border: 2px solid #9a9a9a; display: block; }
+  #slots i.on { background: #eee; }
+  .track {
+    border: 2px solid #9a9a9a;
+    display: flex;
+    align-items: flex-end;
+    box-sizing: border-box;
+  }
+  #voltrack { grid-column: 1; grid-row: 1; }
+  #usbtrack { grid-column: 3; grid-row: 1; }
+  .track i { display: block; width: 100%; background: #eee; height: 0; }
+  .mark { text-align: center; color: #9a9a9a; font-size: 13px; }
+  #volmark { grid-column: 1; grid-row: 2; }
+  #usbmark { grid-column: 3; grid-row: 2; }
+</style>
+</head>
+<body>
+<div class="fit"><div class="stage">
+<header>
+  <button id="connect" type="button">Connect</button>
+  <span id="status">Not connected</span>
+  <span id="meta"></span>
+</header>
+<div id="play"></div>
+<canvas id="wave" width="1200" height="280"></canvas>
+<div id="steps"></div>
+<div id="controls">
+<div id="padrow">
+  <div class="track" id="voltrack"><i id="vol"></i></div>
+  <div id="slots"></div>
+  <div class="track" id="usbtrack"><i id="usb"></i></div>
+  <div class="mark" id="volmark">V</div>
+  <div class="mark" id="usbmark">U</div>
+</div>
+<div id="filtercol">
+  <canvas id="filter" width="240" height="240"></canvas>
+  <div id="bands"></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<script>
+const BYTES = 168;
+const canvas = document.getElementById("wave");
+const ctx = canvas.getContext("2d");
+const status = document.getElementById("status");
+let port, reader, running = false;
+let peaks = null;
+let waveSlot = -1;
+let waveKey = "";
+const waveCache = new Map();
+let view = null;
+const STAGE_W = 676, STAGE_H = 584;
+let stageScale = 1;
+
+function fitStage() {
+  stageScale = Math.min(window.innerWidth / STAGE_W, window.innerHeight / STAGE_H);
+  const fit = document.querySelector(".fit");
+  fit.style.width = `${STAGE_W * stageScale}px`;
+  fit.style.height = `${STAGE_H * stageScale}px`;
+  document.querySelector(".stage").style.transform = `scale(${stageScale})`;
+}
+
+function u16(o) { return view.getUint16(o, true); }
+function u32(o) { return view.getUint32(o, true); }
+function i8(o) { const v = view.getUint8(o); return v > 127 ? v - 256 : v; }
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const bw = Math.max(1, Math.round(canvas.clientWidth * dpr * stageScale));
+  const bh = Math.max(1, Math.round(canvas.clientHeight * dpr * stageScale));
+  if (canvas.width !== bw || canvas.height !== bh) {
+    canvas.width = bw;
+    canvas.height = bh;
+  }
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.strokeStyle = "#3a3a3a";
+  ctx.beginPath();
+  ctx.moveTo(0, h / 2);
+  ctx.lineTo(w, h / 2);
+  ctx.stroke();
+  const size = view ? u32(20) : 0;
+  const scale = size || 1;
+  const xOf = (byte) => Math.max(0, Math.min(w - 1, (byte / scale) * w));
+  if (peaks) {
+    let peak = 1;
+    for (const p of peaks) {
+      if (!p) continue;
+      peak = Math.max(peak, Math.abs(p.max), Math.abs(p.min));
+    }
+    ctx.strokeStyle = "#eee";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < peaks.length; i++) {
+      if (!peaks[i]) continue;
+      const x = (i / peaks.length) * w;
+      const pad = 27 * (h / (canvas.clientHeight || h));
+      const hi = peaks[i].max / peak * (h / 2 - pad);
+      const lo = peaks[i].min / peak * (h / 2 - pad);
+      ctx.moveTo(x, h / 2 - hi);
+      ctx.lineTo(x, h / 2 - lo);
+    }
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+  if (!view) return;
+  const slice = view.getUint8(5) & 1;
+  if (slice) {
+    ctx.strokeStyle = "#eee";
+    for (let i = 0; i < 16; i++) {
+      const a = xOf(u32(40 + i * 4));
+      ctx.beginPath();
+      ctx.moveTo(a, 0);
+      ctx.lineTo(a, h);
+      ctx.stroke();
+    }
+  }
+  ctx.strokeStyle = "#6c6";
+  ctx.strokeRect(xOf(u32(24)), 8, Math.max(1, xOf(u32(28)) - xOf(u32(24))), h - 16);
+  if (view.getUint8(36) === view.getUint8(4)) {
+    ctx.strokeStyle = "#e55";
+    const px = xOf(u32(32));
+    ctx.beginPath();
+    ctx.moveTo(px, 0);
+    ctx.lineTo(px, h);
+    ctx.stroke();
+  }
+}
+
+function readout() {
+  if (!view) return;
+  document.getElementById("meta").textContent =
+    `Project ${view.getUint8(3)}    Pattern ${view.getUint8(6)}`;
+  document.getElementById("play").classList.toggle("on", (view.getUint8(5) & 2) !== 0);
+  const steps = u16(37);
+  document.getElementById("steps").innerHTML = Array.from({ length: 16 }, (_, i) =>
+    `${i && i % 4 === 0 ? "<b></b>" : ""}<i class="${steps & (1 << i) ? "on" : ""}"></i>`).join("");
+  const slot = view.getUint8(4);
+  const grid = document.getElementById("slots");
+  grid.innerHTML = Array.from({ length: 16 }, (_, i) =>
+    `<i class="${i === slot ? "on" : ""}"></i>`).join("");
+  document.getElementById("vol").style.height = `${view.getUint8(10) / 255 * 100}%`;
+  document.getElementById("usb").style.height = `${u16(12) / 4095 * 100}%`;
+  drawFilter(i8(8), view.getUint8(9));
+}
+
+function sizeFilter() {
+  const slots = document.getElementById("slots");
+  const canvas = document.getElementById("filter");
+  const h = slots.offsetHeight;
+  if (h < 1) return;
+  if (canvas.style.height !== `${h}px`) canvas.style.height = `${h}px`;
+  const bands = document.getElementById("bands");
+  const inner = canvas.clientWidth;
+  if (bands.dataset.w === String(inner)) return;
+  bands.dataset.w = String(inner);
+  const left = 16;
+  const right = Math.max(left + 1, inner - 20);
+  bands.replaceChildren();
+  for (const hz of [10, 100, 1000, 10000]) {
+    const label = document.createElement("span");
+    label.textContent = hz >= 1000 ? `${hz / 1000}k` : String(hz);
+    label.style.left = `${left + (Math.log10(hz / 10) / 3) * (right - left)}px`;
+    bands.appendChild(label);
+  }
+}
+
+function drawFilter(cutoff, resonance) {
+  const canvas = document.getElementById("filter");
+  sizeFilter();
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(canvas.clientWidth * dpr * stageScale));
+  const h = Math.max(1, Math.round(canvas.clientHeight * dpr * stageScale));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+  const left = 16 * dpr, right = w - 20 * dpr, top = 10 * dpr, bottom = h - 8 * dpr;
+  const xOfHz = (hz) => left + (Math.log10(hz / 10) / 3) * (right - left);
+  ctx.strokeStyle = "#3a3a3a";
+  ctx.lineWidth = dpr;
+  for (const hz of [10, 100, 1000, 10000]) {
+    const x = xOfHz(hz);
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, bottom);
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.moveTo(left, (top + bottom) / 2);
+  ctx.lineTo(right, (top + bottom) / 2);
+  ctx.stroke();
+  const distance = Math.min(93, Math.max(1, Math.abs(cutoff)));
+  const t = (distance - 1) / 92;
+  const hz = cutoff < 0 ? 8000 * Math.pow(0.01, t) : 80 * Math.pow(100, t);
+  const cut = cutoff === 0 ? 0.5 : Math.log10(hz / 10) / 3;
+  const lowpass = cutoff < 0;
+  const peak = (resonance / 127) * 0.42;
+  ctx.strokeStyle = "#eee";
+  ctx.lineWidth = 2 * dpr;
+  ctx.beginPath();
+  for (let i = 0; i <= 160; i++) {
+    const x = i / 160;
+    let shelf;
+    if (cutoff === 0) shelf = 0.78;
+    else if (lowpass) shelf = x <= cut ? 0.72 : 0.72 * Math.exp(-(x - cut) * 14);
+    else shelf = x >= cut ? 0.72 : 0.72 * Math.exp(-(cut - x) * 14);
+    const bump = cutoff === 0 ? 0 : peak * Math.exp(-((x - cut) * (x - cut)) / 0.003);
+    const y = bottom - Math.min(0.92, shelf + bump) * (bottom - top);
+    if (i === 0) ctx.moveTo(left + x * (right - left), y);
+    else ctx.lineTo(left + x * (right - left), y);
+  }
+  ctx.stroke();
+}
+
+function acceptState(buf) {
+  view = new DataView(buf.buffer, buf.byteOffset, BYTES);
+  const slot = view.getUint8(4);
+  const key = `${view.getUint8(3)}:${slot}:${u32(20)}`;
+  if (key !== waveKey) {
+    waveKey = key;
+    waveSlot = slot;
+    peaks = waveCache.get(key);
+    if (!peaks) {
+      peaks = new Array(200);
+      waveCache.set(key, peaks);
+    }
+  }
+  readout();
+  draw();
+}
+
+function acceptWave(buf) {
+  const head = new DataView(buf.buffer, buf.byteOffset, 16);
+  const slot = head.getUint8(3);
+  const count = head.getUint8(6);
+  const first = head.getUint16(12, true);
+  if (slot !== waveSlot || !peaks) return;
+  for (let i = 0; i < count; i++) {
+    const o = 16 + i * 4;
+    let min = buf[o] | (buf[o + 1] << 8);
+    let max = buf[o + 2] | (buf[o + 3] << 8);
+    if (min > 32767) min -= 65536;
+    if (max > 32767) max -= 65536;
+    peaks[first + i] = { min, max };
+  }
+  draw();
+}
+
+async function readLoop() {
+  const stream = port.readable.getReader();
+  reader = stream;
+  let pending = new Uint8Array(0);
+  try {
+    while (running) {
+      const { value, done } = await stream.read();
+      if (done) break;
+      if (!value) continue;
+      const next = new Uint8Array(pending.length + value.length);
+      next.set(pending);
+      next.set(value, pending.length);
+      pending = next;
+      while (pending.length >= 3) {
+        let at = pending.indexOf(0x4a);
+        if (at < 0) { pending = new Uint8Array(0); break; }
+        if (at > 0) pending = pending.slice(at);
+        if (pending.length < 3) break;
+        if (pending[1] === 0x44 && pending[2] === 1) {
+          if (pending.length < BYTES) break;
+          acceptState(pending.slice(0, BYTES));
+          pending = pending.slice(BYTES);
+        } else if (pending[1] === 0x57 && pending[2] === 1) {
+          if (pending.length < 16) break;
+          const count = pending[6];
+          const bytes = 16 + count * 4;
+          if (pending.length < bytes) break;
+          acceptWave(pending.slice(0, bytes));
+          pending = pending.slice(bytes);
+        } else {
+          pending = pending.slice(1);
+        }
+      }
+    }
+  } catch (err) {
+    status.textContent = err.message;
+  } finally {
+    stream.releaseLock();
+  }
+}
+
+function refit() {
+  fitStage();
+  sizeFilter();
+  draw();
+  if (view) drawFilter(i8(8), view.getUint8(9));
+}
+window.addEventListener("resize", refit);
+refit();
+
+document.getElementById("connect").onclick = async () => {
+  if (!("serial" in navigator)) {
+    status.textContent = "This browser has no serial port. Use Chrome or Edge.";
+    return;
+  }
+  port = await navigator.serial.requestPort();
+  await port.open({ baudRate: 115200 });
+  running = true;
+  status.textContent = "Connected";
+  readLoop();
+};
+
+</script>
+</body>
+</html>

@@ -16,9 +16,9 @@ The first build clones the Pico SDK and Pico Extras. The flashable file is `zept
 
 `tools/prepare-card/index.html` writes the reserved sample slots. Serve that directory over HTTP and open it in Chrome or Edge. A `file://` page cannot write the card.
 
-## Visualizer
+## Display
 
-`visualizer/` is the browser tool that follows the current USB protocol. See `visualizer/README.md`.
+`display/index.html` is the browser view of the current project. Open it in Chrome or Edge, click Connect, and choose the device's USB serial port. The page draws the selected sample from peaks the device sends, plus the project, pattern, filter, and playback position. The hosted page is `https://jay-maculate.github.io/ZO-33/display/`.
 
 ## Layout
 
