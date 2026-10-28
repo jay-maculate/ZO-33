@@ -205,7 +205,7 @@ function draw() {
     ctx.lineWidth = 2;
     ctx.beginPath();
     for (let i = 0; i < peaks.length; i++) {
-      if (!peaks[i]) continue;
+      if (!peaks[i] || peaks[i].min > peaks[i].max) continue;
       const x = (i / peaks.length) * w;
       const pad = 27 * (h / (canvas.clientHeight || h));
       const hi = peaks[i].max / peak * (h / 2 - pad);
