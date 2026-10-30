@@ -11,19 +11,31 @@ Key features:
 - Maximum of 4 voices of polyphony
 - Resample feature for quickly turning audio of patterns into a single sample
 
+Learn more about the Zeptocore hardware here: https://infinitedigits.co/collections/zeptocore/
+
 ## How to Get Started
-Download the UF2 firmware file here: https://github.com/jay-maculate/ZO-33/releases 
+Download the most recent UF2 firmware file here: https://github.com/jay-maculate/ZO-33/releases 
 
 Format your SD card, then use the Prepare Card tool here: https://jay-maculate.github.io/ZO-33/tools/prepare-card/
 
 Boot the Zeptocore into firmware upload mode by holding the bottom of the two buttons on the Raspberry Pi, then plugging in the unit. While still holding that button, press the top button on the Raspberry Pi, then release both buttons.
 
-There should be a window with the USB drive called RPI RP2 on your computer. Drag and drop the Uf2 firmware file into that window.
+There should be a window with the USB drive called RPI RP2 on your computer. Drag and drop the UF2 firmware file into that window.
 
 The Zeptocore should boot into the new firmware and initialize the card for use. After the LEDs stop flashing, the device is ready to use. The card only needs to be prepared and initialized once. 
 
 ## Button and Knob Designations
-The knobs and the top row of buttons are represented by letters (knobs: X, Y, and Z // buttons: A, B, C, and D). The rest of the buttons are represented by numbers (1-16).
+The knobs and the top row of buttons are represented by letters, and the rest of the buttons are represented by numbers.
+
+|  |  |  |  |
+|--|--|--|--|
+| k. X | k. Y | k. Z | _ |
+| b. A | b. B | b. C | b. D |
+| b. 1 | b. 2 | b. 3 | b. 4 |
+| b. 5 | b. 6 | b. 7 | b. 8 |
+| b. 9 | b. 10 | b. 11 | b. 12 |
+| b. 13 | b. 14 | b. 15 | b. 16 |
+
 
 The top buttons generally perform these functions:
 
@@ -33,6 +45,8 @@ The top buttons generally perform these functions:
 - D is the Write/Edit button. It is used to enter step edit mode where notes can be drawn on the grid, and used in shortcuts that write (i.e. copy) or delete data.
 
 The X, Y, and Z knobs control different parameters depending on what button is held while turning the knob. A full list of mappings appears in the All Shortcuts section.
+
+The numbered buttons correspond to slots (sample, pattern, or project slots) or steps in the step sequencer. They can also trigger playback of the currently selected sample. 
 
 ## How to Adjust the Main Output Volume, USB Input Volume, and Tempo
 Main Output volume: Hold A and turn the X knob.
@@ -94,7 +108,7 @@ The steps that have notes drawn to them will be lit, and steps with no notes are
 Each sample slot has its own sequence, so to adjust the sequence of a different sample slot, Hold B and select that slot’s pad to see the step sequencer for that sample.
 
 ## How to Add Notes to the Pattern in Real Time
-You can input notes into the sequence as it plays live by pressing A to play the pattern, then holding D and pressing the pads of notes as the pattern plays. 
+Press A to play the pattern, then hold D and press the pads of notes as the pattern plays. Those notes will snap to the step the seqeuncer was on while the pattern played (no micro-timing).
 
 ## How to Select a Pattern or Pattern Chain
 Hold C, then select one of the 16 pads. The active selection will blink. Pattern slots with note data saved to them will be dimly lit, and slots with no notes will not be lit.
