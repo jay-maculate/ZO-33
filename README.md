@@ -1,20 +1,24 @@
 # ZO-33
 
 ## What is ZO-33?
-ZO-33 is a custom firmware for the Zeptocore open source sample player which adds capabilities like sampling and pattern sequencing to emulate the workflow and experience of using the PO-33 Pocket Operator. Each of the 16 projects can have up to 16 samples, which can be sliced or played chromatically in 16-step patterns that can be chained.
+ZO-33 is a custom firmware for the Zeptocore open source sample player which adds capabilities like sampling and pattern sequencing to emulate the workflow and experience of using the PO-33 Pocket Operator. 
 
-Samples have to be recorded over the USB C connection from an audio host device such as a laptop/computer, smartphone, or tablet. Samples are recorded as 16 bit 44.1 kHz mono WAV files with a maximum length of 20s per sample slot.
-
-The maximum polyphony is 4 voices, however there is a quick resample function which can turn the audio of a pattern into a single sample to keep the voice count low.
-
-Note: only the Zeptocore is supported, I don't have the other -core hardware devices like the Ectocore or Zeptocade to test.
+Key features:
+- Record up to 16 samples over USB C, which can be sliced or played chromatically
+- Samples are 16 bit 44.1 kHz mono WAV files, with max length of 20 seconds for each slot
+- Create and chain patterns using the 16-step sequencer
+- Save up to 16 projects
+- Maximum of 4 voices of polyphony
+- Resample feature for quickly turning audio of patterns into a single sample
 
 ## How to Get Started
-Before installing the firmware, you will need to format your SD card and then prepare it by following the instructions in the Prepare ZO-33 Card tool located here: https://jay-maculate.github.io/ZO-33/tools/prepare-card/ 
+Download the UF2 firmware file here: https://github.com/jay-maculate/ZO-33/releases 
 
-After the SD card is prepared, insert it into the Zeptocore, then follow the instructions on the Infinite Digits website to put the Zeptocore into firmware upload mode: https://shop.infinitedigits.co/guides/zeptocore/#zeptocore-firmware
+Format your SD card, then use the Prepare Card tool here: https://jay-maculate.github.io/ZO-33/tools/prepare-card/
 
-After that, drag and drop the latest firmware file downloaded from the ZO-33 releases page into the RPI drive that appears on your computer: https://github.com/jay-maculate/ZO-33/releases 
+Boot the Zeptocore into firmware upload mode by holding the bottom of the two buttons on the Raspberry Pi, then plugging in the unit. While still holding that button, press the top button on the Raspberry Pi, then release both buttons.
+
+There should be a window with the USB drive called RPI RP2 on your computer. Drag and drop the Uf2 firmware file into that window.
 
 The Zeptocore should boot into the new firmware and initialize the card for use. After the LEDs stop flashing, the device is ready to use. The card only needs to be prepared and initialized once. 
 
@@ -22,13 +26,11 @@ The Zeptocore should boot into the new firmware and initialize the card for use.
 The knobs and the top row of buttons are represented by letters (knobs: X, Y, and Z // buttons: A, B, C, and D). The rest of the buttons are represented by numbers (1-16).
 
 The top buttons generally perform these functions:
-A is the Play button. It is used to start and stop playback of the pattern, and used in shortcuts related to the project.
 
-B is the Sample Slot button. It is used to select the active sample, and used in shortcuts related to samples.
-
-C is the Pattern button. It is used to select the active pattern, and used in shortcuts related to patterns.
-
-D is the Write/Edit button. It is used to enter step edit mode where notes can be drawn on the grid, and used in shortcuts that write (i.e. copy) or delete data.
+- A is the Play button. It is used to start and stop playback of the pattern, and used in shortcuts related to the project.
+- B is the Sample Slot button. It is used to select the active sample, and used in shortcuts related to samples.
+- C is the Pattern button. It is used to select the active pattern, and used in shortcuts related to patterns.
+- D is the Write/Edit button. It is used to enter step edit mode where notes can be drawn on the grid, and used in shortcuts that write (i.e. copy) or delete data.
 
 The X, Y, and Z knobs control different parameters depending on what button is held while turning the knob. A full list of mappings appears in the All Shortcuts section.
 
@@ -129,60 +131,45 @@ Hold A and press D to toggle the project select mode. Press the pad of the curre
 ## All Shortcuts List
 Global knob controls:
 
-  Hold A then turn X: Adjust the main output volume
-  
-  Hold A then turn Y: Adjust the USB input volume
-  
-  Hold A then turn Z: Adjust the tempo, with a range of 60-180 BPM
+- Hold A then turn X: Adjust the main output volume
+- Hold A then turn Y: Adjust the USB input volume
+- Hold A then turn Z: Adjust the tempo, with a range of 60-180 BPM
 
 
 Sample edit knob controls: 
 
-  Turn X (no additional button held): Adjust sample pitch 
-  
-  Turn Y (no additional button held): Adjust sample (or slice) start point
-  
-  Turn Z (no additional button held): Adjust sample (or slice) end point
-  
-  Hold D then turn X: Adjust sample level (velocity)
-  
-  Hold D then turn Y: Adjust sample (or slice) start point (fine edit - the knob pointed straight up is no adjustment, then turning left move the start point back and right moves it forward within a smaller zone than the full length of the recording)
-  
-  Hold D then turn Z: Adjust sample (or slice) end point (fine edit - the knob pointed straight up is no adjustment, then turning left move the start point back and right moves it forward within a smaller zone than the full length of the recording)
+- Turn X (no additional button held): Adjust sample pitch
+- Turn Y (no additional button held): Adjust sample (or slice) start point
+- Turn Z (no additional button held): Adjust sample (or slice) end point
+- Hold D then turn X: Adjust sample level (velocity)
+- Hold D then turn Y: Adjust sample (or slice) start point (fine edit - the knob pointed straight up is no adjustment, then turning left move the start point back and right moves it forward within a smaller zone than the full length of the recording)
+- Hold D then turn Z: Adjust sample (or slice) end point (fine edit - the knob pointed straight up is no adjustment, then turning left move the start point back and right moves it forward within a smaller zone than the full length of the recording)
 
 
 Sample Playback knob controls:
-
-  Hold B then turn X: Change sample slot to chromatic mode (left zone of knob) or slice mode (right zone of knob)
-  
-  Hold B then turn Y: Adjust filter cutoff frequency (left is low pass, right is high pass)
-  
-  Hold B then turn Z: Adjust resonance of filter
-  
-  Hold C then turn X: Adjust envelope attack of sample (or all slices)
-  
-  Hold C then turn Y: Adjust envelope decay of sample (or all slices)
-  
-  Hold C then turn Z: Adjust envelope release of sample (or all slices)
+- Hold B then turn X: Change sample slot to chromatic mode (left zone of knob) or slice mode (right zone of knob)
+- Hold B then turn Y: Adjust filter cutoff frequency (left is low pass, right is high pass)
+- Hold B then turn Z: Adjust resonance of filter
+- Hold C then turn X: Adjust envelope attack of sample (or all slices)
+- Hold C then turn Y: Adjust envelope decay of sample (or all slices)
+- Hold C then turn Z: Adjust envelope release of sample (or all slices)
   
 
 Step edit knob controls:
-  Hold a step, then turn X: Adjust Microtiming of that step from +0% to +50%
-  
-  Hold a step, then turn Y: Adjust velocity (volume) of that step
+- Hold a step, then turn X: Adjust Microtiming of that step from +0% to +50%
+- Hold a step, then turn Y: Adjust velocity (volume) of that step
   
 
 Copy/Delete shortcuts
 
-  Hold B then press D: Toggle sample copy mode. Press a pad to paste the sample there, press D to exit, or press the current sample slot twice to delete it
-  
-  Hold C then press D: Toggle pattern copy mode. Press a pad to paste the pattern there, press D to exit, or press the current pattern slot twice to delete it
+- Hold B then press D: Toggle sample copy mode. Press a pad to paste the sample there, press D to exit, or press the current sample slot twice to delete it
+- Hold C then press D: Toggle pattern copy mode. Press a pad to paste the pattern there, press D to exit, or press the current pattern slot twice to delete it
 
 
 Project shortcuts:
-  Hold A then press D to toggle project select mode. Select a pad to laid that project, press D to exit and return to the current project, or press the current project slot twice to delete it
+- Hold A then press D to toggle project select mode. Select a pad to laid that project, press D to exit and return to the current project, or press the current project slot twice to delete it
 
 
 Resample shortcut:
-  Hold D and press C to toggle resample mode. Select a pad to capture the audio of the pattern into a single WAV file to that slot, or press D to exit.
+- Hold D and press C to toggle resample mode. Select a pad to capture the audio of the pattern into a single WAV file to that slot, or press D to exit.
 
