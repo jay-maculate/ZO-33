@@ -152,7 +152,7 @@
 </div>
 </div>
 <script>
-const BYTES = 168;
+const BYTES = 172;
 const canvas = document.getElementById("wave");
 const ctx = canvas.getContext("2d");
 const status = document.getElementById("status");
@@ -213,6 +213,24 @@ function draw() {
       ctx.moveTo(x, h / 2 - hi);
       ctx.lineTo(x, h / 2 - lo);
     }
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+  if (view && view.byteLength >= 172) {
+    const frame = view.getUint8(11) || 2;
+    const origin = u32(24);
+    const attack = view.getUint16(168, true);
+    const release = view.getUint16(170, true);
+    const pad = 27 * (h / (canvas.clientHeight || h));
+    const yZero = h / 2;
+    const yFull = pad;
+    ctx.strokeStyle = "#f33";
+    ctx.lineWidth = 2 * (window.devicePixelRatio || 1);
+    ctx.beginPath();
+    ctx.moveTo(xOf(origin), yZero);
+    ctx.lineTo(xOf(origin + attack * frame), yFull);
+    ctx.moveTo(xOf(origin), yFull);
+    ctx.lineTo(xOf(origin + release * frame), yZero);
     ctx.stroke();
     ctx.lineWidth = 1;
   }
@@ -380,7 +398,7 @@ async function readLoop() {
         if (at < 0) { pending = new Uint8Array(0); break; }
         if (at > 0) pending = pending.slice(at);
         if (pending.length < 3) break;
-        if (pending[1] === 0x44 && pending[2] === 1) {
+        if (pending[1] === 0x44 && pending[2] === 2) {
           if (pending.length < BYTES) break;
           acceptState(pending.slice(0, BYTES));
           pending = pending.slice(BYTES);
