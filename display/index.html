@@ -152,7 +152,7 @@
 </div>
 </div>
 <script>
-const BYTES = 172;
+const BYTES = 174;
 const canvas = document.getElementById("wave");
 const ctx = canvas.getContext("2d");
 const status = document.getElementById("status");
@@ -216,30 +216,33 @@ function draw() {
     ctx.stroke();
     ctx.lineWidth = 1;
   }
-  if (view && view.byteLength >= 172) {
+  if (view && view.byteLength >= 174) {
     const frame = view.getUint8(11) || 2;
     const origin = u32(24);
     const end = u32(28) || u32(20);
     const attack = view.getUint16(168, true);
-    const release = view.getUint16(170, true);
+    const hold = view.getUint16(170, true);
+    const decay = view.getUint16(172, true);
     const pad = 27 * (h / (canvas.clientHeight || h));
     const yZero = h / 2;
     const yFull = pad;
     let span = Math.max(0, end - origin);
     let atk = attack * frame;
-    let rel = release * frame;
-    if (atk + rel > span && atk + rel > 0) {
-      const fit = span / (atk + rel);
+    let hol = hold * frame;
+    let dec = decay * frame;
+    if (atk + hol + dec > span && atk + hol + dec > 0) {
+      const fit = span / (atk + hol + dec);
       atk *= fit;
-      rel *= fit;
+      hol *= fit;
+      dec *= fit;
     }
     ctx.strokeStyle = "#f33";
     ctx.lineWidth = 2 * (window.devicePixelRatio || 1);
     ctx.beginPath();
     ctx.moveTo(xOf(origin), yZero);
     ctx.lineTo(xOf(origin + atk), yFull);
-    ctx.lineTo(xOf(end - rel), yFull);
-    ctx.lineTo(xOf(end), yZero);
+    ctx.lineTo(xOf(origin + atk + hol), yFull);
+    ctx.lineTo(xOf(origin + atk + hol + dec), yZero);
     ctx.stroke();
     ctx.lineWidth = 1;
   }
@@ -407,7 +410,7 @@ async function readLoop() {
         if (at < 0) { pending = new Uint8Array(0); break; }
         if (at > 0) pending = pending.slice(at);
         if (pending.length < 3) break;
-        if (pending[1] === 0x44 && pending[2] === 2) {
+        if (pending[1] === 0x44 && pending[2] === 3) {
           if (pending.length < BYTES) break;
           acceptState(pending.slice(0, BYTES));
           pending = pending.slice(BYTES);
