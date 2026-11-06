@@ -155,7 +155,7 @@ Sample edit knob controls:
 - Turn X (no additional button held): Adjust sample pitch
 - Turn Y (no additional button held): Adjust sample (or slice) start point
 - Turn Z (no additional button held): Adjust sample (or slice) end point
-- Hold D then turn X: Adjust sample level (velocity)
+- Hold D then turn X: Adjust the level of the sample. Step velocity is a percentage of this level
 - Hold D then turn Y: Adjust sample (or slice) start point (fine edit - the knob pointed straight up is no adjustment, then turning left move the start point back and right moves it forward within a smaller zone than the full length of the recording)
 - Hold D then turn Z: Adjust sample (or slice) end point (fine edit - the knob pointed straight up is no adjustment, then turning left move the start point back and right moves it forward within a smaller zone than the full length of the recording)
 
@@ -164,14 +164,14 @@ Sample Playback knob controls:
 - Hold B then turn X: Change sample slot to chromatic mode (left zone of knob) or slice mode (right zone of knob)
 - Hold B then turn Y: Adjust filter cutoff frequency (left is low pass, right is high pass)
 - Hold B then turn Z: Adjust resonance of filter
-- Hold C then turn X: Adjust envelope attack of sample (or all slices)
-- Hold C then turn Y: Adjust envelope decay of sample (or all slices)
-- Hold C then turn Z: Adjust envelope release of sample (or all slices)
+- Hold C then turn X: Adjust envelope attack of the sample
+- Hold C then turn Y: Adjust envelope hold of the sample
+- Hold C then turn Z: Adjust envelope decay of the sample
   
 
 Step edit knob controls:
 - Hold a step, then turn X: Adjust Microtiming of that step from +0% to +50%
-- Hold a step, then turn Y: Adjust velocity (volume) of that step
+- Hold a step, then turn Y: Adjust velocity of that step, as a percentage of the sample level
   
 
 Copy/Delete shortcuts

@@ -88,6 +88,13 @@ static void sample_slot_setup_filter_hz(ResonantFilter *rf, int8_t cutoff,
   rf->do_setFilterType = false;
 }
 
+static void sample_slot_install_filter(SampleSlotVoice *v) {
+  sample_slot_setup_filter_hz(&v->filter_l, v->applied_filter, v->play_filter_hz,
+                              v->applied_filter_q);
+  sample_slot_setup_filter_hz(&v->filter_r, v->applied_filter, v->play_filter_hz,
+                              v->applied_filter_q);
+}
+
 static void sample_slot_refresh_filters(void) {
   static uint32_t last_us;
   uint32_t now = time_us_32();
@@ -98,33 +105,77 @@ static void sample_slot_refresh_filters(void) {
   for (uint8_t voice = 0; voice < SAMPLE_SLOT_VOICES; voice++) {
     SampleSlotVoice *v = &sample_slot_voice[voice];
     if (!v->filter_dirty && !v->play_filter_glide) continue;
-    if (v->play_filter == 0) {
-      sample_slot_setup_filter_hz(&v->filter_l, 0, 0, 0);
-      sample_slot_setup_filter_hz(&v->filter_r, 0, 0, 0);
-      v->play_filter_hz = 0;
-      v->play_filter_glide = false;
-      v->applied_filter = 0;
+    int8_t target_cut = v->play_filter;
+    if (!v->play_filter_glide) {
+      if (target_cut == 0) {
+        sample_slot_setup_filter_hz(&v->filter_l, 0, 0, 0);
+        sample_slot_setup_filter_hz(&v->filter_r, 0, 0, 0);
+        v->play_filter_hz = 0;
+        v->applied_filter = 0;
+      } else {
+        v->play_filter_hz = sample_slot_cutoff_hz(target_cut);
+        v->applied_filter = target_cut < 0 ? -1 : 1;
+        v->applied_filter_q = v->play_filter_q;
+        sample_slot_install_filter(v);
+      }
       v->applied_filter_q = v->play_filter_q;
+      v->play_filter_glide = false;
       v->filter_dirty = false;
+      v->filter_ramp = 0;
       continue;
     }
-    float target = sample_slot_cutoff_hz(v->play_filter);
-    bool type_changed = v->applied_filter != 0 &&
-                        (v->applied_filter < 0) != (v->play_filter < 0);
-    if (!v->play_filter_glide || v->play_filter_hz <= 0.0f || type_changed)
-      v->play_filter_hz = target;
-    else {
-      v->play_filter_hz += (target - v->play_filter_hz) * alpha;
-      if (fabsf(v->play_filter_hz - target) <= target * 0.01f)
-        v->play_filter_hz = target;
+    if (v->applied_filter == 0) {
+      if (target_cut == 0) {
+        v->play_filter_glide = false;
+        v->filter_dirty = false;
+        continue;
+      }
+      v->applied_filter = target_cut < 0 ? -1 : 1;
+      v->play_filter_hz = sample_slot_cutoff_hz(v->applied_filter);
+      v->applied_filter_q = v->play_filter_q;
+      sample_slot_install_filter(v);
+      v->filter_ramp = 1;
+      v->filter_dirty = true;
+      continue;
     }
-    sample_slot_setup_filter_hz(&v->filter_l, v->play_filter, v->play_filter_hz,
-                                v->play_filter_q);
-    sample_slot_setup_filter_hz(&v->filter_r, v->play_filter, v->play_filter_hz,
-                                v->play_filter_q);
-    v->applied_filter = v->play_filter;
-    v->applied_filter_q = v->play_filter_q;
-    v->play_filter_glide = v->play_filter_hz != target;
+    bool same = target_cut != 0 && ((v->applied_filter < 0) == (target_cut < 0));
+    float hz_goal = sample_slot_cutoff_hz(same ? target_cut : (v->applied_filter < 0 ? -1 : 1));
+    if (v->play_filter_hz <= 0.0f)
+      v->play_filter_hz = hz_goal;
+    else {
+      v->play_filter_hz += (hz_goal - v->play_filter_hz) * alpha;
+      if (fabsf(v->play_filter_hz - hz_goal) <= hz_goal * 0.01f)
+        v->play_filter_hz = hz_goal;
+    }
+    if (same) {
+      int q = v->applied_filter_q;
+      int q_goal = v->play_filter_q;
+      q += (int)((q_goal - q) * alpha);
+      if (q == v->applied_filter_q && q != q_goal)
+        q += q_goal > q ? 1 : -1;
+      if (q < 0) q = 0;
+      if (q > 127) q = 127;
+      v->applied_filter_q = (uint8_t)q;
+    }
+    if (!same && v->play_filter_hz == hz_goal) {
+      if (target_cut == 0) {
+        v->filter_ramp = -1;
+        v->applied_filter = 0;
+        v->play_filter_hz = 0;
+        v->play_filter_glide = false;
+        v->filter_dirty = false;
+        sample_slot_setup_filter_hz(&v->filter_l, 0, 0, 0);
+        sample_slot_setup_filter_hz(&v->filter_r, 0, 0, 0);
+        continue;
+      }
+      v->applied_filter = target_cut < 0 ? -1 : 1;
+      v->play_filter_hz = sample_slot_cutoff_hz(v->applied_filter);
+      v->filter_ramp = 1;
+    }
+    sample_slot_install_filter(v);
+    bool arrived = same && v->play_filter_hz == sample_slot_cutoff_hz(target_cut) &&
+                   v->applied_filter_q == v->play_filter_q;
+    v->play_filter_glide = !arrived;
     v->filter_dirty = v->play_filter_glide;
   }
 }
@@ -215,7 +266,9 @@ void __not_in_flash_func(input_handling)()
     sample_slot_due = 0;
     restore_interrupts(sample_slot_irq);
     while (sample_slot_ticks_due--) sample_slot_advance();
-    while (!sample_slot_due && sample_slot_prefetch_service()) {
+    for (uint8_t sample_slot_reads = 0;
+         sample_slot_reads < 4 && sample_slot_prefetch_service();
+         sample_slot_reads++) {
     }
     if (sample_slot_step_mask_pattern != sample_slot_pattern_sel)
       sample_slot_step_mask_refresh();
@@ -264,6 +317,22 @@ void __not_in_flash_func(input_handling)()
       }
     }
     sample_slot_refresh_filters();
+#ifdef BTN_COL_START
+    // button handler
+    if (button_handler(bm))
+    {
+      // reset knob debouncers
+      adc_threshold = 10000;
+      for (uint8_t i = 0; i < 3; i++)
+      {
+        adc_debounce[i] = 0;
+      }
+    }
+    else
+    {
+      adc_threshold = adc_threshold_const;
+    }
+#endif
     if (!sample_slot_audio_short()) {
     audio_media_poll();
     metadata_deferred_presets();
@@ -347,23 +416,6 @@ void __not_in_flash_func(input_handling)()
         send_text_as_sysex("version=v8.0.4");
       }
     }
-
-#ifdef BTN_COL_START
-    // button handler
-    if (!sample_slot_audio_short() && button_handler(bm))
-    {
-      // reset knob debouncers
-      adc_threshold = 10000;
-      for (uint8_t i = 0; i < 3; i++)
-      {
-        adc_debounce[i] = 0;
-      }
-    }
-    else
-    {
-      adc_threshold = adc_threshold_const;
-    }
-#endif
 
 #ifdef INCLUDE_CLOCKINPUT
     if (!use_onewiremidi)
@@ -454,25 +506,32 @@ void __not_in_flash_func(input_handling)()
     static uint8_t sample_slot_env_streak[3] = {0, 0, 0};
     static uint8_t sample_slot_env_arm[3] = {0, 0, 0};
     static uint8_t sample_slot_env_wait_key = 0;
-    static uint16_t sample_slot_x_settle = 0;
     static int sample_slot_x_anchor = 0;
+    static int sample_slot_x_still_at = 0;
+    static uint8_t sample_slot_x_still = 0;
     uint16_t adc_raw = adc_read();
     adc = FilterExp_update(adcs[0], adc_raw);
     bool x_mod = button_is_pressed(KEY_B) || button_is_pressed(KEY_C) ||
                  button_is_pressed(KEY_D);
-    if (sample_slot_x_pitch_lock && !x_mod) {
-      if (abs(sample_slot_x_anchor - adc) > adc_threshold) {
-        sample_slot_x_settle = 250;
-        sample_slot_x_anchor = adc;
-      }
-      adc_last[0] = adc;
-      if (sample_slot_x_settle > 0)
-        sample_slot_x_settle--;
-      else
-        sample_slot_x_pitch_lock = false;
-    } else if (sample_slot_x_pitch_lock && x_mod) {
-      sample_slot_x_settle = 250;
+    if (sample_slot_x_pitch_lock && x_mod) {
       sample_slot_x_anchor = adc;
+      sample_slot_x_still = 0;
+      sample_slot_x_still_at = adc;
+    } else if (sample_slot_x_pitch_lock) {
+      adc_last[0] = adc;
+      adc_debounce[0] = 0;
+      if (abs(sample_slot_x_anchor - adc) > 200) {
+        if (abs(sample_slot_x_still_at - adc) <= adc_threshold) {
+          if (++sample_slot_x_still >= 8)
+            sample_slot_x_pitch_lock = false;
+        } else {
+          sample_slot_x_still = 0;
+          sample_slot_x_still_at = adc;
+        }
+      } else {
+        sample_slot_x_still = 0;
+        sample_slot_x_still_at = adc;
+      }
     }
     if (sample_slot_env_held[0] &&
         button_is_pressed(sample_slot_env_arm[0])) {
@@ -580,10 +639,6 @@ void __not_in_flash_func(input_handling)()
           if (level < 1) level = 1;
           if (level > 127) level = 127;
           sample_slot_level[sample_slot_edit] = (uint8_t)level;
-          for (uint8_t voice = 0; voice < SAMPLE_SLOT_VOICES; voice++) {
-            if (sample_slot_voice[voice].sample == sample_slot_edit)
-              sample_slot_voice[voice].play_velocity = (uint8_t)level;
-          }
           project_mark();
           if (adc_debounce[0] == 0) {
             if (!sample_slot_env_held[0])
@@ -610,6 +665,8 @@ void __not_in_flash_func(input_handling)()
           if (offset > 12) offset = 12;
           sample_slot_pitch[sample_slot_edit] = (int8_t)offset;
           sample_slot_active_pitch[sample_slot_edit] = (int8_t)offset;
+          if (sample_slot_slice_mode[sample_slot_edit])
+            sample_slot_pitch_settled_at = time_us_32();
           project_mark();
           if (!sample_slot_playing) {
             for (uint8_t voice = 0; voice < SAMPLE_SLOT_VOICES; voice++) {
@@ -666,23 +723,30 @@ void __not_in_flash_func(input_handling)()
     uint16_t y_raw = adc_read();
     adc = FilterExp_update(adcs[1], y_raw);
     static bool sample_slot_y_lock = false;
-    static uint16_t sample_slot_y_settle = 0;
     static int sample_slot_y_anchor = 0;
+    static int sample_slot_y_still_at = 0;
+    static uint8_t sample_slot_y_still = 0;
     bool y_mod = button_is_pressed(KEY_A) || button_is_pressed(KEY_B) ||
                  button_is_pressed(KEY_C) || button_is_pressed(KEY_D);
-    if (sample_slot_y_lock && !y_mod) {
-      if (abs(sample_slot_y_anchor - adc) > adc_threshold) {
-        sample_slot_y_settle = 250;
-        sample_slot_y_anchor = adc;
-      }
-      adc_last[1] = adc;
-      if (sample_slot_y_settle > 0)
-        sample_slot_y_settle--;
-      else
-        sample_slot_y_lock = false;
-    } else if (sample_slot_y_lock) {
-      sample_slot_y_settle = 250;
+    if (sample_slot_y_lock && y_mod) {
       sample_slot_y_anchor = adc;
+      sample_slot_y_still = 0;
+      sample_slot_y_still_at = adc;
+    } else if (sample_slot_y_lock) {
+      adc_last[1] = adc;
+      adc_debounce[1] = 0;
+      if (abs(sample_slot_y_anchor - adc) > 200) {
+        if (abs(sample_slot_y_still_at - adc) <= adc_threshold) {
+          if (++sample_slot_y_still >= 8)
+            sample_slot_y_lock = false;
+        } else {
+          sample_slot_y_still = 0;
+          sample_slot_y_still_at = adc;
+        }
+      } else {
+        sample_slot_y_still = 0;
+        sample_slot_y_still_at = adc;
+      }
     }
     if (sample_slot_env_held[1] &&
         button_is_pressed(sample_slot_env_arm[1])) {
@@ -742,17 +806,18 @@ void __not_in_flash_func(input_handling)()
             cutoff = (int8_t)(fc + 1);
           }
           sample_slot_filter[sample_slot_edit] = cutoff;
+          sample_slot_filter_notes(sample_slot_edit);
           sample_slot_y_lock = true;
           project_mark();
-          if (!sample_slot_playing) {
-            for (uint8_t voice = 0; voice < SAMPLE_SLOT_VOICES; voice++) {
-              SampleSlotVoice *playing = &sample_slot_voice[voice];
-              if (playing->sample == sample_slot_edit) {
-                playing->play_filter = cutoff;
-                playing->play_filter_glide = true;
-                playing->filter_dirty = true;
-              }
+          for (uint8_t voice = 0; voice < SAMPLE_SLOT_VOICES; voice++) {
+            SampleSlotVoice *playing = &sample_slot_voice[voice];
+            if (playing->sample == sample_slot_edit) {
+              playing->play_filter = cutoff;
+              playing->play_filter_glide = true;
+              playing->filter_dirty = true;
             }
+          }
+          if (!sample_slot_playing) {
             if (adc_debounce[1] == 0) {
               if (!sample_slot_env_held[1]) {
                 sample_slot_env_wait = 8;
@@ -770,13 +835,8 @@ void __not_in_flash_func(input_handling)()
         else if (button_is_pressed(KEY_C) && mode_buttons16 == MODE_SAMPLE_SLOT)
         {
           sample_slot_y_lock = true;
-          if (adc >= 4095 - 200)
-            sample_slot_decay[sample_slot_edit] = 0;
-          else
-          sample_slot_decay[sample_slot_edit] = (uint16_t)(
-              SAMPLE_SLOT_ENV_MIN +
-              (uint32_t)adc * (SAMPLE_SLOT_ENV_MAX - SAMPLE_SLOT_ENV_MIN) /
-                  (4095u - 200u));
+          sample_slot_hold[sample_slot_edit] =
+              (uint16_t)((uint32_t)adc * SAMPLE_SLOT_ENV_MAX / 4095u);
           project_mark();
           if (adc_debounce[1] == 0) {
             if (!sample_slot_env_held[1])
@@ -803,7 +863,7 @@ void __not_in_flash_func(input_handling)()
                  !sample_slot_y_lock)
         {
           sample_slot_set_bound(sample_slot_edit, false, (uint16_t)adc);
-          if (adc_debounce[1] == 0 &&
+          if (adc_debounce[1] == 0 && !sample_slot_playing &&
               sample_slot_slice_mode[sample_slot_edit])
             sample_slot_preview(sample_slot_edit,
                                 sample_slot_slice_sel[sample_slot_edit], true);
@@ -882,23 +942,30 @@ void __not_in_flash_func(input_handling)()
     uint16_t z_raw = adc_read();
     adc = FilterExp_update(adcs[2], z_raw);
     static bool sample_slot_z_lock = false;
-    static uint16_t sample_slot_z_settle = 0;
     static int sample_slot_z_anchor = 0;
+    static int sample_slot_z_still_at = 0;
+    static uint8_t sample_slot_z_still = 0;
     bool z_mod = button_is_pressed(KEY_A) || button_is_pressed(KEY_B) ||
                  button_is_pressed(KEY_C) || button_is_pressed(KEY_D);
-    if (sample_slot_z_lock && !z_mod) {
-      if (abs(sample_slot_z_anchor - adc) > adc_threshold) {
-        sample_slot_z_settle = 250;
-        sample_slot_z_anchor = adc;
-      }
-      adc_last[2] = adc;
-      if (sample_slot_z_settle > 0)
-        sample_slot_z_settle--;
-      else
-        sample_slot_z_lock = false;
-    } else if (sample_slot_z_lock) {
-      sample_slot_z_settle = 250;
+    if (sample_slot_z_lock && z_mod) {
       sample_slot_z_anchor = adc;
+      sample_slot_z_still = 0;
+      sample_slot_z_still_at = adc;
+    } else if (sample_slot_z_lock) {
+      adc_last[2] = adc;
+      adc_debounce[2] = 0;
+      if (abs(sample_slot_z_anchor - adc) > 200) {
+        if (abs(sample_slot_z_still_at - adc) <= adc_threshold) {
+          if (++sample_slot_z_still >= 8)
+            sample_slot_z_lock = false;
+        } else {
+          sample_slot_z_still = 0;
+          sample_slot_z_still_at = adc;
+        }
+      } else {
+        sample_slot_z_still = 0;
+        sample_slot_z_still_at = adc;
+      }
     }
     if (sample_slot_env_held[2] &&
         button_is_pressed(sample_slot_env_arm[2])) {
@@ -940,15 +1007,17 @@ void __not_in_flash_func(input_handling)()
           uint8_t resonance = adc * 127 / 4095;
           sample_slot_z_lock = true;
           sample_slot_filter_q[sample_slot_edit] = resonance;
+          sample_slot_filter_notes(sample_slot_edit);
           project_mark();
-          if (!sample_slot_playing) {
-            for (uint8_t voice = 0; voice < SAMPLE_SLOT_VOICES; voice++) {
-              SampleSlotVoice *playing = &sample_slot_voice[voice];
-              if (playing->sample == sample_slot_edit) {
-                playing->play_filter_q = resonance;
-                playing->filter_dirty = true;
-              }
+          for (uint8_t voice = 0; voice < SAMPLE_SLOT_VOICES; voice++) {
+            SampleSlotVoice *playing = &sample_slot_voice[voice];
+            if (playing->sample == sample_slot_edit) {
+              playing->play_filter_q = resonance;
+              playing->play_filter_glide = playing->play_filter != 0;
+              playing->filter_dirty = true;
             }
+          }
+          if (!sample_slot_playing) {
             if (adc_debounce[2] == 0) {
               if (!sample_slot_env_held[2]) {
                 sample_slot_env_wait = 8;
@@ -966,9 +1035,8 @@ void __not_in_flash_func(input_handling)()
         else if (button_is_pressed(KEY_C) && mode_buttons16 == MODE_SAMPLE_SLOT)
         {
           sample_slot_z_lock = true;
-          sample_slot_release[sample_slot_edit] = (uint16_t)(
-              SAMPLE_SLOT_ENV_MIN +
-              (uint32_t)adc * (SAMPLE_SLOT_ENV_MAX - SAMPLE_SLOT_ENV_MIN) / 4095u);
+          sample_slot_decay[sample_slot_edit] =
+              (uint16_t)((uint32_t)adc * SAMPLE_SLOT_ENV_MAX / 4095u);
           project_mark();
           if (adc_debounce[2] == 0) {
             if (!sample_slot_env_held[2])
@@ -1030,14 +1098,32 @@ void __not_in_flash_func(input_handling)()
       if (sample_slot_playing)
         sample_slot_env_wait = 0;
       else if (--sample_slot_env_wait == 0) {
-        sample_slot_preview(sample_slot_edit,
-                            sample_slot_slice_sel[sample_slot_edit], true);
+        bool sample_slot_filter_preview = sample_slot_env_wait_key == KEY_B;
+        bool sample_slot_already_open = false;
+        if (sample_slot_filter_preview) {
+          for (uint8_t voice = 0; voice < SAMPLE_SLOT_VOICES; voice++) {
+            SampleSlotVoice *playing = &sample_slot_voice[voice];
+            if (playing->sample == sample_slot_edit && playing->open &&
+                !playing->cue) {
+              sample_slot_already_open = true;
+              break;
+            }
+          }
+        }
+        if (!sample_slot_already_open)
+          sample_slot_preview(sample_slot_edit,
+                              sample_slot_slice_sel[sample_slot_edit], true);
         if (sample_slot_env_wait_key == KEY_C ||
             sample_slot_env_wait_key == KEY_D) {
           for (uint8_t voice = 0; voice < SAMPLE_SLOT_VOICES; voice++) {
-            if (sample_slot_voice[voice].sample == sample_slot_edit)
+            if (sample_slot_voice[voice].sample == sample_slot_edit) {
               sample_slot_voice[voice].attack_len =
                   sample_slot_attack[sample_slot_edit];
+              sample_slot_voice[voice].hold_len =
+                  sample_slot_hold[sample_slot_edit];
+              sample_slot_voice[voice].decay_len =
+                  sample_slot_decay[sample_slot_edit];
+            }
           }
         }
       }

@@ -49,8 +49,8 @@ extern uint32_t sample_slot_region_end[16];
 extern int8_t sample_slot_filter[16];
 extern uint8_t sample_slot_filter_q[16];
 extern uint16_t sample_slot_attack[16];
+extern uint16_t sample_slot_hold[16];
 extern uint16_t sample_slot_decay[16];
-extern uint16_t sample_slot_release[16];
 extern uint8_t sample_slot_level[16];
 extern uint8_t sample_slot_edit;
 extern uint8_t sample_slot_pattern_sel;
@@ -148,9 +148,9 @@ static bool project_body(FIL *file, bool write, bool ends) {
     return false;
   if (write) {
     uint16_t vol = project_get_vol();
-    return project_io(file, sample_slot_attack, sizeof sample_slot_attack, true) &&
+    return            project_io(file, sample_slot_attack, sizeof sample_slot_attack, true) &&
+           project_io(file, sample_slot_hold, sizeof sample_slot_hold, true) &&
            project_io(file, sample_slot_decay, sizeof sample_slot_decay, true) &&
-           project_io(file, sample_slot_release, sizeof sample_slot_release, true) &&
            project_io(file, sample_slot_level, sizeof sample_slot_level, true) &&
            project_io(file, &vol, 2, true);
   }
@@ -159,13 +159,13 @@ static bool project_body(FIL *file, bool write, bool ends) {
       got != sizeof sample_slot_attack) {
     for (uint8_t i = 0; i < 16; i++) sample_slot_attack[i] = 64;
   }
+  if (f_read(file, sample_slot_hold, sizeof sample_slot_hold, &got) != FR_OK ||
+      got != sizeof sample_slot_hold) {
+    memset(sample_slot_hold, 0, sizeof sample_slot_hold);
+  }
   if (f_read(file, sample_slot_decay, sizeof sample_slot_decay, &got) != FR_OK ||
       got != sizeof sample_slot_decay) {
     memset(sample_slot_decay, 0, sizeof sample_slot_decay);
-  }
-  if (f_read(file, sample_slot_release, sizeof sample_slot_release, &got) != FR_OK ||
-      got != sizeof sample_slot_release) {
-    for (uint8_t i = 0; i < 16; i++) sample_slot_release[i] = 64;
   }
   if (f_read(file, sample_slot_level, sizeof sample_slot_level, &got) != FR_OK ||
       got != sizeof sample_slot_level) {
@@ -259,8 +259,8 @@ static void project_blank(void) {
   memset(sample_slot_region_end, 0, sizeof sample_slot_region_end);
   for (uint8_t i = 0; i < 16; i++) {
     sample_slot_attack[i] = 64;
+    sample_slot_hold[i] = 0;
     sample_slot_decay[i] = 0;
-    sample_slot_release[i] = 64;
     sample_slot_level[i] = 127;
   }
   project_set_vol(180);

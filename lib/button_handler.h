@@ -429,7 +429,7 @@ bool button_handler(ButtonMatrix *bm) {
     key_did_go_off[i] = false;
   }
   for (uint8_t i = 0; i < bm->off_num; i++) {
-    key_total_pressed--;
+    if (key_total_pressed) key_total_pressed--;
     key_on_buttons_last[bm->off[i]] = key_on_buttons[bm->off[i]];
     key_on_buttons[bm->off[i]] = 0;
     key_did_go_off[bm->off[i]] = true;
@@ -523,7 +523,13 @@ bool button_handler(ButtonMatrix *bm) {
   if (key_total_pressed > 0) {
     key_timer_on++;
     if (key_total_pressed == 1) {
-      single_key_on = key_pressed[0];
+      single_key_on = -1;
+      for (uint8_t held = 0; held < BUTTONMATRIX_BUTTONS_MAX; held++) {
+        if (key_on_buttons[held]) {
+          single_key_on = (int8_t)held;
+          break;
+        }
+      }
     } else {
       single_key_on = -1;
     }
@@ -799,16 +805,22 @@ bool button_handler(ButtonMatrix *bm) {
     chain_step_lights_skip = key_did_go_off[KEY_C] ? 1 : 0;
     if (!skip_steps) {
       uint16_t match = 0;
-      if (!sample_slot_playing) {
-        bool slice = sample_slot_slice_mode[sample_slot_edit];
-        uint8_t slice_sel = sample_slot_slice_sel[sample_slot_edit];
-        int8_t pitch = sample_slot_active_pitch[sample_slot_edit];
+      bool slice = sample_slot_slice_mode[sample_slot_edit];
+      uint8_t slice_sel = sample_slot_slice_sel[sample_slot_edit];
+      int8_t pitch = sample_slot_active_pitch[sample_slot_edit];
+      uint32_t settled_age = sample_slot_pitch_settled_at
+          ? time_us_32() - sample_slot_pitch_settled_at : 0;
+      bool pitch_flash = slice && sample_slot_pitch_settled_at &&
+          settled_age > 150000 && settled_age < 330000;
+      if (!sample_slot_playing || pitch_flash) {
         for (uint16_t n = 0; n < sample_slot_note_count; n++) {
           SampleSlotNote *note = &sample_slot_notes[n];
           if (note->pattern != sample_slot_pattern_sel ||
               note->sample != sample_slot_edit || note->step > 15)
             continue;
-          if (slice ? note->slice == slice_sel : note->pitch == pitch)
+          if (pitch_flash ? note->pitch == pitch
+                          : (slice ? note->slice == slice_sel
+                                   : note->pitch == pitch))
             match |= (uint16_t)(1u << note->step);
         }
       }
@@ -818,10 +830,10 @@ bool button_handler(ButtonMatrix *bm) {
       }
       if (sample_slot_playing)
         LEDS_set(leds, sample_slot_step + 4, LED_BRIGHT);
-      else {
+      if (!sample_slot_playing || pitch_flash) {
         for (uint8_t i = 0; i < 16; i++) {
           if (match & (uint16_t)(1u << i))
-            LEDS_set(leds, i + 4, LED_BLINK);
+            LEDS_set(leds, i + 4, pitch_flash ? LED_BRIGHT : LED_BLINK);
         }
       }
     }

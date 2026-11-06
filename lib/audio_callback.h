@@ -86,19 +86,44 @@ uint32_t sine_wave_counter = 0;
 
 static void __not_in_flash_func(sample_slot_filter_voice)(SampleSlotVoice *v,
                                                            int32_t *samples,
-                                     uint32_t frames, int8_t cutoff,
-                                     uint8_t resonance) {
-  if (cutoff == 0 || frames == 0) return;
-  if (v->applied_filter != cutoff || v->applied_filter_q != resonance) return;
+                                     uint32_t frames) {
+  if (frames == 0) return;
+  int8_t ramp = v->filter_ramp;
+  if (v->applied_filter == 0 && ramp >= 0) {
+    v->filter_ramp = 0;
+    return;
+  }
   if (v->filter_reset) {
     v->filter_l.x1_f = v->filter_l.x2_f = v->filter_l.y1_f = v->filter_l.y2_f =
         0;
     v->filter_r.x1_f = v->filter_r.x2_f = v->filter_r.y1_f = v->filter_r.y2_f =
         0;
     v->filter_reset = false;
+    ramp = 0;
+    v->filter_ramp = 0;
   }
-  ResonantFilter_process_block(&v->filter_l, samples, frames, 0, 0);
-  ResonantFilter_process_block(&v->filter_r, samples, frames, 1, 0);
+  if (!ramp) {
+    ResonantFilter_process_block(&v->filter_l, samples, frames, 0, 0);
+    ResonantFilter_process_block(&v->filter_r, samples, frames, 1, 0);
+    return;
+  }
+  v->filter_ramp = 0;
+  for (uint32_t i = 0; i < frames; i++) {
+    int32_t *s = samples + i * 2;
+    int32_t in_l = s[0];
+    int32_t in_r = s[1];
+    ResonantFilter_process_block(&v->filter_l, s, 1, 0, 0);
+    ResonantFilter_process_block(&v->filter_r, s, 1, 1, 0);
+    int32_t wet = (int32_t)(((int64_t)(i + 1) << 16) / frames);
+    int32_t dry = 65536 - wet;
+    if (ramp < 0) {
+      int32_t swap = wet;
+      wet = dry;
+      dry = swap;
+    }
+    s[0] = (int32_t)(((int64_t)in_l * dry + (int64_t)s[0] * wet) >> 16);
+    s[1] = (int32_t)(((int64_t)in_r * dry + (int64_t)s[1] * wet) >> 16);
+  }
 }
 
 static uint8_t slot_pull_sec[512];
@@ -175,6 +200,7 @@ static uint16_t pref_count(SampleSlotVoice *v) {
 }
 
 static void pref_clear(SampleSlotVoice *v) {
+  v->pref_epoch++;
   __dmb();
   v->pref_w = v->pref_r;
   v->pref_eof = false;
@@ -199,6 +225,8 @@ static void pref_push(SampleSlotVoice *v, const int16_t *stereo, uint32_t frames
 }
 
 static uint32_t pref_take(SampleSlotVoice *v, int16_t *dst, uint32_t max) {
+  uint8_t epoch = v->pref_epoch;
+  __dmb();
   uint16_t w = v->pref_w;
   __dmb();
   uint16_t r = v->pref_r;
@@ -211,8 +239,133 @@ static uint32_t pref_take(SampleSlotVoice *v, int16_t *dst, uint32_t max) {
     if (++r == SAMPLE_SLOT_PREF_FRAMES) r = 0;
   }
   __dmb();
+  if (v->pref_epoch != epoch) {
+    v->pref_torn = true;
+    return 0;
+  }
   v->pref_r = r;
   return have;
+}
+
+#define SLOT_STAGE_BYTES 2048u
+static uint8_t slot_stage[SAMPLE_SLOT_VOICES][SLOT_STAGE_BYTES];
+
+static uint32_t slot_bound(SampleSlotVoice *v, uint32_t end) {
+  uint32_t limit = end;
+  int ord = sample_slot_ord(v->sample);
+  if (ord >= 0 && banks[project_bank]) {
+    SampleInfo *info = banks[project_bank]->sample[ord].snd[FILEZERO];
+    if (info && info->size && (!limit || info->size < limit)) limit = info->size;
+  }
+  return limit;
+}
+
+static uint32_t slot_read_cap(uint32_t phase, uint32_t end) {
+  uint32_t cap = SLOT_STAGE_BYTES;
+  if (end) {
+    if (phase >= end) return 0;
+    uint32_t remain = end - phase;
+    if (remain < cap) cap = remain;
+  }
+  return cap & ~1u;
+}
+
+static bool slot_load_at(SampleSlotVoice *v, uint32_t phase, uint8_t *dst,
+                         uint32_t cap, uint32_t *got) {
+  *got = 0;
+  if (sample_slot_direct_ready())
+    return sample_slot_direct_read(v->sample, v->data_off + phase, dst, cap, got) &&
+           *got >= 2u;
+  if (f_lseek(&v->fil, v->data_off + phase) != FR_OK) return false;
+  UINT n = 0;
+  if (f_read(&v->fil, dst, (UINT)cap, &n) != FR_OK) return false;
+  *got = n;
+  return n >= 2u;
+}
+
+static int16_t slot_s16(const uint8_t *p);
+
+static bool slot_pref_publish(SampleSlotVoice *v, const uint8_t *raw, uint32_t got) {
+  uint32_t frame_bytes = v->src_channels ? v->src_channels : 2u;
+  uint32_t frames = got / frame_bytes;
+  if (!frames) return false;
+  pref_clear(v);
+  v->pref_at = v->phase;
+  v->file_at = v->data_off + v->phase;
+  slot_pull_voice = 0xff;
+  int16_t stereo[256 * 2];
+  for (uint32_t base = 0; base < frames;) {
+    uint32_t n = frames - base;
+    if (n > 256u) n = 256u;
+    for (uint32_t i = 0; i < n; i++) {
+      int16_t s = slot_s16(raw + (base + i) * frame_bytes);
+      stereo[i * 2] = s;
+      stereo[i * 2 + 1] = s;
+    }
+    pref_push(v, stereo, n);
+    base += n;
+  }
+  v->pref_at += frames * frame_bytes;
+  v->pref_eof = false;
+  v->primed = false;
+  v->have_ahead = false;
+  v->frac_q16 = 0;
+  v->hold_run = 0;
+  v->resume_fade = 0;
+  v->hold_l = 0;
+  v->hold_r = 0;
+  __dmb();
+  v->seek = false;
+  return true;
+}
+
+static bool slot_stage_fill(SampleSlotVoice *v) {
+  uint8_t vi = (uint8_t)(v - sample_slot_voice);
+  if (vi >= SAMPLE_SLOT_VOICES) return false;
+  v->stage_bytes = 0;
+  uint32_t cap = slot_read_cap(v->pending_phase, slot_bound(v, v->pending_end));
+  uint32_t n = 0;
+  if (cap < 2u ||
+      !slot_load_at(v, v->pending_phase, slot_stage[vi], cap, &n))
+    return false;
+  v->stage_phase = v->pending_phase;
+  __dmb();
+  v->stage_bytes = (uint16_t)n;
+  return true;
+}
+
+static bool slot_stage_pending(void) {
+  for (uint8_t vi = 0; vi < SAMPLE_SLOT_VOICES; vi++) {
+    SampleSlotVoice *v = &sample_slot_voice[vi];
+    if (!v->defer_restart || v->seek) continue;
+    if (v->stage_bytes >= 2u && v->stage_phase == v->pending_phase) continue;
+    slot_stage_fill(v);
+    return true;
+  }
+  return false;
+}
+
+static bool slot_seek_publish(SampleSlotVoice *v) {
+  uint8_t vi = (uint8_t)(v - sample_slot_voice);
+  pref_clear(v);
+  v->hold_l = 0;
+  v->hold_r = 0;
+  v->have_ahead = false;
+  uint32_t cap = slot_read_cap(v->phase, slot_bound(v, v->play_end));
+  if (cap < 2u) return false;
+  uint8_t raw[SLOT_STAGE_BYTES];
+  uint32_t got = 0;
+  const uint8_t *src = raw;
+  if (vi < SAMPLE_SLOT_VOICES && v->stage_bytes >= 2u &&
+      v->stage_phase == v->phase) {
+    src = slot_stage[vi];
+    got = v->stage_bytes;
+    if (got > cap) got = cap;
+    v->stage_bytes = 0;
+  } else if (!slot_load_at(v, v->phase, raw, cap, &got)) {
+    return false;
+  }
+  return slot_pref_publish(v, src, got);
 }
 
 static void sample_slot_voice_close(SampleSlotVoice *v) {
@@ -242,9 +395,10 @@ static int16_t slot_s16(const uint8_t *p) {
   return (int16_t)(p[0] | (p[1] << 8));
 }
 
-static void slot_pref_read(SampleSlotVoice *v, SampleInfo *info) {
+static void slot_pref_fill(SampleSlotVoice *v, SampleInfo *info, bool allow_seek) {
   uint32_t frame_bytes = v->src_channels;
-  if (!info || !info->size || !frame_bytes || v->seek || v->pref_eof) return;
+  if (!info || !info->size || !frame_bytes || v->pref_eof) return;
+  if (v->seek && !allow_seek) return;
   uint32_t limit = info->size;
   if (v->play_end && v->play_end < limit) limit = v->play_end;
   if (v->pref_at >= limit) {
@@ -295,6 +449,10 @@ static void slot_pref_read(SampleSlotVoice *v, SampleInfo *info) {
   }
   v->pref_at += frames * frame_bytes;
   if (v->pref_at >= limit) v->pref_eof = true;
+}
+
+static void slot_pref_read(SampleSlotVoice *v, SampleInfo *info) {
+  slot_pref_fill(v, info, false);
 }
 
 static uint32_t slot_pref_cushion(SampleSlotVoice *v) {
@@ -389,6 +547,7 @@ static bool slot_voice_engage(SampleSlotVoice *v) {
     v->data_off = v->reserve ? RESERVE_DATA_OFF : 44u;
     v->fil.cltbl = v->reserve ? v->clmt : 0;
   }
+  v->seek = true;
   v->open = true;
   pref_clear(v);
   v->pref_at = v->phase;
@@ -397,17 +556,17 @@ static bool slot_voice_engage(SampleSlotVoice *v) {
   v->short_read = false;
   v->hold_run = 0;
   v->resume_fade = 0;
-  if (!sample_slot_direct_ready() && f_lseek(&v->fil, at) != FR_OK) {
-    v->seek = true;
-    return true;
-  }
-  v->seek = false;
+  if (!sample_slot_direct_ready() && f_lseek(&v->fil, at) != FR_OK) return true;
   v->pref_eof = false;
   v->primed = false;
   v->have_ahead = false;
   v->frac_q16 = 0;
   slot_pull_voice = 0xff;
-  slot_pref_read(v, banks[project_bank]->sample[ord].snd[FILEZERO]);
+  slot_pref_fill(v, banks[project_bank]->sample[ord].snd[FILEZERO], true);
+  if (pref_count(v) || v->pref_eof) {
+    __dmb();
+    v->seek = false;
+  }
   return true;
 }
 
@@ -448,6 +607,7 @@ static int slot_cue_arm(void) {
     v->sample = n->sample;
     v->phase = phase;
     v->play_end = end;
+    v->play_slice = sample_slot_slice_mode[n->sample] ? n->slice : 0xff;
     v->play_pitch = n->pitch;
     v->cue = true;
     v->restart = true;
@@ -518,17 +678,10 @@ void sample_slot_voices_for_card(void) {
 
 bool sample_slot_prefetch_service(void) {
   if (usb_record_blocks_card()) {
-    for (uint8_t vi = 0; vi < SAMPLE_SLOT_VOICES; vi++) {
-      SampleSlotVoice *v = &sample_slot_voice[vi];
-      if (v->open || v->fil.obj.fs) sample_slot_voice_close(v);
-      v->restart = false;
-      v->kill = false;
-    }
+    sample_slot_voices_for_card();
     usb_record_card_free();
-    sample_slot_sd_busy = false;
     return false;
   }
-  if (sample_slot_due && !sample_slot_resample_busy) return false;
 #if AUDIO_EXTRA_OUTPUT_BUFFER
   if (!sample_slot_resample_busy && audio_queued_blocks() < 2) return false;
 #endif
@@ -630,29 +783,21 @@ bool sample_slot_prefetch_service(void) {
     return true;
   } else if (seek_at >= 0) {
     SampleSlotVoice *v = &sample_slot_voice[seek_at];
-    pref_clear(v);
-    v->pref_at = v->phase;
-    uint32_t at = v->data_off + v->phase;
-    v->file_at = at;
-    if (sample_slot_direct_ready() || f_lseek(&v->fil, at) == FR_OK) {
-      slot_pull_voice = 0xff;
-      v->seek = false;
-      v->pref_eof = false;
-      v->primed = false;
-      v->have_ahead = false;
-      v->frac_q16 = 0;
-      v->hold_run = 0;
-      v->resume_fade = 0;
-      if (v->next_on && v->next_phase == v->phase && v->next_len) {
-        slot_next_apply(v);
-      } else if (sample_slot_direct_ready()) {
-        int ord = sample_slot_ord(v->sample);
-        if (ord >= 0)
-          slot_pref_read(v, banks[project_bank]->sample[ord].snd[FILEZERO]);
+    if (v->next_on && v->next_phase == v->phase && v->next_len) {
+      uint8_t vi = (uint8_t)(v - sample_slot_voice);
+      if (slot_pref_publish(v, slot_next_raw[vi], v->next_len)) {
+        v->next_on = false;
+        v->next_need = false;
+        v->next_len = 0;
       }
+    } else {
+      slot_seek_publish(v);
     }
     sample_slot_sd_busy = busy;
     return !v->seek;
+  } else if (slot_stage_pending()) {
+    sample_slot_sd_busy = true;
+    return true;
   } else if (next_at >= 0) {
     SampleSlotVoice *v = &sample_slot_voice[next_at];
     uint32_t got = 0;
@@ -665,25 +810,7 @@ bool sample_slot_prefetch_service(void) {
     return v->next_on;
   } else if (cue_seek >= 0) {
     SampleSlotVoice *v = &sample_slot_voice[cue_seek];
-    pref_clear(v);
-    v->pref_at = v->phase;
-    uint32_t at = v->data_off + v->phase;
-    v->file_at = at;
-    if (sample_slot_direct_ready() || f_lseek(&v->fil, at) == FR_OK) {
-      slot_pull_voice = 0xff;
-      v->seek = false;
-      v->pref_eof = false;
-      v->primed = false;
-      v->have_ahead = false;
-      v->frac_q16 = 0;
-      v->hold_run = 0;
-      v->resume_fade = 0;
-      if (sample_slot_direct_ready()) {
-        int ord = sample_slot_ord(v->sample);
-        if (ord >= 0)
-          slot_pref_read(v, banks[project_bank]->sample[ord].snd[FILEZERO]);
-      }
-    }
+    slot_seek_publish(v);
     sample_slot_sd_busy = busy;
     return !v->seek;
   } else if (cue_read >= 0) {
@@ -735,11 +862,13 @@ static void sample_slot_resample_clock(SampleSlotVoice *v, uint32_t frames) {
     }
     v->phase = v->pending_phase;
     v->play_end = v->pending_end;
+    v->play_slice = v->pending_slice;
     v->defer_restart = false;
     v->attack_pos = 0;
+    v->hold_pos = 0;
     v->decay_pos = 0;
     return;
-  } else if (v->decay_len) {
+  } else {
     uint32_t n = frames;
     if (v->attack_pos < v->attack_len) {
       uint32_t rise = v->attack_len - v->attack_pos;
@@ -747,17 +876,25 @@ static void sample_slot_resample_clock(SampleSlotVoice *v, uint32_t frames) {
       v->attack_pos = (uint16_t)(v->attack_pos + rise);
       n -= rise;
     }
-    if (n && v->decay_pos < v->decay_len) {
-      uint32_t fall = v->decay_len - v->decay_pos;
-      if (fall > n) fall = n;
-      v->decay_pos = (uint16_t)(v->decay_pos + fall);
-      n -= fall;
+    if (n && !v->decay_pos && v->hold_pos < v->hold_len) {
+      uint32_t flat = v->hold_len - v->hold_pos;
+      if (flat > n) flat = n;
+      v->hold_pos = (uint16_t)(v->hold_pos + flat);
+      n -= flat;
     }
-    if (n && v->decay_pos >= v->decay_len) {
-      v->open = false;
-      v->kill = false;
-      v->release_left = 0;
-      return;
+    if (n && v->decay_len) {
+      if (v->decay_pos < v->decay_len) {
+        uint32_t fall = v->decay_len - v->decay_pos;
+        if (fall > n) fall = n;
+        v->decay_pos = (uint16_t)(v->decay_pos + fall);
+        n -= fall;
+      }
+      if (n && v->decay_pos >= v->decay_len) {
+        v->open = false;
+        v->kill = false;
+        v->release_left = 0;
+        return;
+      }
     }
   }
   int ord = sample_slot_ord(v->sample);
@@ -788,8 +925,6 @@ static void __not_in_flash_func(sample_slot_render_voices)(int32_t *dst,
     }
     int ord = sample_slot_ord(v->sample);
     int8_t pitch = v->play_pitch;
-    int8_t cutoff = v->play_filter;
-    uint8_t resonance = v->play_filter_q;
     if (v->kill && !v->release_left) continue;
     if (v->cue || v->restart || v->seek || !v->open || ord < 0) continue;
     SampleInfo *info = banks[project_bank]->sample[ord].snd[FILEZERO];
@@ -816,6 +951,7 @@ static void __not_in_flash_func(sample_slot_render_voices)(int32_t *dst,
         v->release_left = 0;
         v->phase = v->pending_phase;
         v->play_end = v->pending_end;
+        v->play_slice = v->pending_slice;
         v->defer_restart = false;
         v->seek = true;
         v->primed = false;
@@ -824,21 +960,19 @@ static void __not_in_flash_func(sample_slot_render_voices)(int32_t *dst,
         v->hold_run = 0;
         v->resume_fade = 0;
         v->attack_pos = 0;
+        v->hold_pos = 0;
         v->decay_pos = 0;
         v->short_read = false;
         v->filter_reset = true;
-        if (v->pending_velocity) v->play_velocity = v->pending_velocity;
-        v->release_len = sample_slot_release[v->sample]
-                             ? sample_slot_release[v->sample]
-                             : SAMPLE_SLOT_ENV_MIN;
+        v->play_velocity = v->pending_velocity;
+        v->release_len = 0;
         ending = v->phase >= info->size || (v->play_end && v->phase >= v->play_end);
       }
-      if (ending && v->play_end && v->phase >= v->play_end && !v->release_left &&
-          !(v->decay_len && v->decay_pos >= v->decay_len)) {
-        v->release_left = v->release_len ? v->release_len : SAMPLE_SLOT_ENV_MIN;
-        v->kill = true;
-        v->play_end = 0;
-        ending = v->phase >= info->size;
+      if (ending && !v->release_left) {
+        v->open = false;
+        v->kill = false;
+        v->pref_drop = true;
+        break;
       }
       if (ending && v->release_left) {
         uint32_t span = todo;
@@ -850,8 +984,12 @@ static void __not_in_flash_func(sample_slot_render_voices)(int32_t *dst,
           int32_t right = (int32_t)(((int64_t)v->hold_r << 16) * fall / den);
           left = q16_16_multiply(left, gain);
           right = q16_16_multiply(right, gain);
-          left = (int32_t)((int64_t)left * v->play_velocity / 127);
-          right = (int32_t)((int64_t)right * v->play_velocity / 127);
+          {
+            uint8_t level = v->sample < 16 ? sample_slot_level[v->sample] : 127;
+            int32_t scale = (int32_t)v->play_velocity * level;
+            left = (int32_t)((int64_t)left * scale / (127 * 127));
+            right = (int32_t)((int64_t)right * scale / (127 * 127));
+          }
           dst[(dst_at + i) * 2] += left;
           dst[(dst_at + i) * 2 + 1] += right;
           v->release_left--;
@@ -931,6 +1069,12 @@ static void __not_in_flash_func(sample_slot_render_voices)(int32_t *dst,
         if (chunk == 0) break;
         uint32_t have = pref_take(v, pcm + filled * 2, chunk);
         if (have < chunk) {
+          if (v->pref_torn || v->seek || v->restart) {
+            v->pref_torn = false;
+            stopped = true;
+            starved = false;
+            break;
+          }
           if (have) {
             filled += have;
             v->phase += have * frame_bytes;
@@ -1011,6 +1155,8 @@ static void __not_in_flash_func(sample_slot_render_voices)(int32_t *dst,
           raw_l = (int32_t)((int64_t)raw_l * rise / v->attack_len);
           raw_r = (int32_t)((int64_t)raw_r * rise / v->attack_len);
           v->attack_pos++;
+        } else if (!held && !v->decay_pos && v->hold_pos < v->hold_len) {
+          v->hold_pos++;
         } else if (!held && v->decay_len) {
           if (v->decay_pos < v->decay_len) {
             uint32_t fall = (uint32_t)v->decay_len - v->decay_pos;
@@ -1030,8 +1176,12 @@ static void __not_in_flash_func(sample_slot_render_voices)(int32_t *dst,
         tail_r = (int16_t)(raw_r >> 16);
         int32_t left = q16_16_multiply(raw_l, gain);
         int32_t right = q16_16_multiply(raw_r, gain);
-        left = (int32_t)((int64_t)left * v->play_velocity / 127);
-        right = (int32_t)((int64_t)right * v->play_velocity / 127);
+        {
+          uint8_t level = v->sample < 16 ? sample_slot_level[v->sample] : 127;
+          int32_t scale = (int32_t)v->play_velocity * level;
+          left = (int32_t)((int64_t)left * scale / (127 * 127));
+          right = (int32_t)((int64_t)right * scale / (127 * 127));
+        }
         voice_buf[i * 2] = left;
         voice_buf[i * 2 + 1] = right;
         produced++;
@@ -1039,7 +1189,7 @@ static void __not_in_flash_func(sample_slot_render_voices)(int32_t *dst,
       }
       uint32_t voiced = cut ? produced : span;
       if (voiced) {
-        sample_slot_filter_voice(v, voice_buf, voiced, cutoff, resonance);
+        sample_slot_filter_voice(v, voice_buf, voiced);
         for (uint32_t i = 0; i < voiced; i++) {
           dst[(dst_at + i) * 2] += voice_buf[i * 2];
           dst[(dst_at + i) * 2 + 1] += voice_buf[i * 2 + 1];
@@ -1090,6 +1240,7 @@ static void __not_in_flash_func(sample_slot_render_voices)(int32_t *dst,
       if (!v->release_left && v->defer_restart) {
         v->phase = v->pending_phase;
         v->play_end = v->pending_end;
+        v->play_slice = v->pending_slice;
         v->defer_restart = false;
         if (v->steal_after) {
           v->sample = v->pending_sample;
@@ -1105,13 +1256,12 @@ static void __not_in_flash_func(sample_slot_render_voices)(int32_t *dst,
         v->hold_run = 0;
         v->resume_fade = 0;
         v->attack_pos = 0;
+        v->hold_pos = 0;
         v->decay_pos = 0;
         v->short_read = false;
         v->filter_reset = true;
-        if (v->pending_velocity) v->play_velocity = v->pending_velocity;
-        v->release_len = sample_slot_release[v->sample]
-                             ? sample_slot_release[v->sample]
-                             : SAMPLE_SLOT_ENV_MIN;
+        v->play_velocity = v->pending_velocity;
+        v->release_len = 0;
         if (sample_slot_resample_busy) {
           pref_clear(v);
           v->pref_at = v->phase;

@@ -37,6 +37,27 @@ static volatile int32_t rec_peak;
 static int32_t rec_mix_peak;
 static FIL rec_file;
 static bool rec_open;
+static uint8_t rec_write_fails;
+
+static bool rec_open_wav(void) {
+  if (rec_open) return true;
+  char name[32];
+  snprintf(name, sizeof name, "bank%u/%u.0.wav", project_bank + 1, rec_slot);
+  extern void audio_file_quiesce(void);
+  extern volatile bool fil_is_open;
+  extern char fil_current_name[32];
+  if (fil_is_open && strcmp(fil_current_name, name) == 0) audio_file_quiesce();
+  FRESULT opened = sample_slot_reserve_ok
+                       ? f_open(&rec_file, name, FA_READ | FA_WRITE)
+                       : FR_DENIED;
+  if (opened == FR_LOCKED || opened == FR_TOO_MANY_OPEN_FILES) return false;
+  if (opened != FR_OK || f_lseek(&rec_file, RESERVE_DATA_OFF) != FR_OK) {
+    if (opened == FR_OK) f_close(&rec_file);
+    return false;
+  }
+  rec_open = true;
+  return true;
+}
 
 static void rec_store(uint32_t index, int16_t left, int16_t right) {
   rec_samples[index * 2u] = left;
@@ -387,8 +408,11 @@ void usb_record_arm(uint8_t slot) {
   rec_peak = 0;
   rec_mix_peak = 0;
   rec_epoch_seen = rec_epoch;
+  rec_write_fails = 0;
   rec_block = 1;
   __dmb();
+  sample_slot_voices_for_card();
+  rec_open_wav();
   rec_state = REC_ARMED;
 }
 
@@ -531,8 +555,8 @@ static void sample_slot_reset_slot(uint8_t slot) {
   extern int8_t sample_slot_pitch[16];
   extern int8_t sample_slot_active_pitch[16];
   extern uint16_t sample_slot_attack[16];
+  extern uint16_t sample_slot_hold[16];
   extern uint16_t sample_slot_decay[16];
-  extern uint16_t sample_slot_release[16];
   extern uint8_t sample_slot_level[16];
   extern int8_t sample_slot_filter[16];
   extern uint8_t sample_slot_filter_q[16];
@@ -550,8 +574,8 @@ static void sample_slot_reset_slot(uint8_t slot) {
   sample_slot_pitch[slot] = 0;
   sample_slot_active_pitch[slot] = 0;
   sample_slot_attack[slot] = 64;
+  sample_slot_hold[slot] = 0;
   sample_slot_decay[slot] = 0;
-  sample_slot_release[slot] = 64;
   sample_slot_level[slot] = 127;
   sample_slot_filter[slot] = 0;
   sample_slot_filter_q[slot] = 0;
@@ -668,18 +692,18 @@ static void rec_finish(bool keep) {
           }
         }
         f_close(&rec_file);
-        rec_catalogue(audio);
-        sample_slot_reset_slot(rec_slot);
-        {
-          extern uint8_t sample_slot_edit;
-          extern uint8_t sample_slot_active;
-          extern uint8_t sample_slot_step_mask_pattern;
-          sample_slot_edit = rec_slot;
-          sample_slot_active = rec_slot;
-          sample_slot_step_mask_pattern = 0xff;
-        }
-        project_mark();
       }
+      rec_catalogue(audio);
+      sample_slot_reset_slot(rec_slot);
+      {
+        extern uint8_t sample_slot_edit;
+        extern uint8_t sample_slot_active;
+        extern uint8_t sample_slot_step_mask_pattern;
+        sample_slot_edit = rec_slot;
+        sample_slot_active = rec_slot;
+        sample_slot_step_mask_pattern = 0xff;
+      }
+      project_mark();
     } else {
       f_close(&rec_file);
     }
@@ -688,6 +712,11 @@ static void rec_finish(bool keep) {
   memset(rec_samples, 0, sizeof rec_samples);
   rec_block = 0;
   rec_state = REC_IDLE;
+  sample_slot_voices_for_card();
+  {
+    extern bool sample_slot_hold_edited;
+    sample_slot_hold_edited = false;
+  }
 }
 
 bool sample_slot_resample_open(uint8_t slot) {
@@ -846,43 +875,31 @@ static bool rec_drain(void) {
 
 void usb_record_poll(bool d_held) {
   if (rec_state == REC_IDLE) return;
-  if (!d_held && rec_state == REC_ARMED) {
+  if (!rec_open) rec_open_wav();
+  if (!d_held && rec_state == REC_ARMED && rec_w == rec_r) {
+    if (rec_open) {
+      f_close(&rec_file);
+      rec_open = false;
+    }
     rec_block = 0;
     rec_state = REC_IDLE;
     return;
   }
-  if (rec_state == REC_CAPTURE) {
-    if (!d_held) {
-      rec_finish(false);
-      return;
-    }
-    if (rec_epoch == rec_epoch_seen) return;
-    char name[32];
-    snprintf(name, sizeof name, "bank%u/%u.0.wav", project_bank + 1, rec_slot);
-    extern void audio_file_quiesce(void);
-    extern volatile bool fil_is_open;
-    extern char fil_current_name[32];
-    if (fil_is_open && strcmp(fil_current_name, name) == 0) audio_file_quiesce();
-    FRESULT opened = sample_slot_reserve_ok
-                         ? f_open(&rec_file, name, FA_READ | FA_WRITE)
-                         : FR_DENIED;
-    if (opened == FR_LOCKED || opened == FR_TOO_MANY_OPEN_FILES) return;
-    if (opened != FR_OK || f_lseek(&rec_file, RESERVE_DATA_OFF) != FR_OK) {
-      if (opened == FR_OK) f_close(&rec_file);
-      rec_finish(false);
-      return;
-    }
-    rec_open = true;
-    rec_state = REC_RECORD;
-  }
-  if (rec_state != REC_RECORD) return;
+  if (rec_state != REC_CAPTURE && rec_state != REC_RECORD) return;
   bool capped = rec_frames >= REC_MAX_FRAMES;
-  if (!rec_drain() || !d_held || rec_overflow || capped) {
-    rec_state = REC_RECORD;
-    rec_drain();
+  if (!d_held || capped) {
+    if (rec_open) rec_drain();
     rec_finish(true);
     if (capped) rec_full_until = time_us_32() + 180000u;
+    return;
   }
+  if (!rec_open) return;
+  if (!rec_drain()) {
+    if (++rec_write_fails >= 4) rec_finish(true);
+    return;
+  }
+  rec_write_fails = 0;
+  rec_overflow = 0;
 }
 
 bool usb_record_full_flash(void) {
@@ -1013,8 +1030,8 @@ static void sample_slot_copy_settings(uint8_t src, uint8_t dest) {
   extern int8_t sample_slot_pitch[16];
   extern int8_t sample_slot_active_pitch[16];
   extern uint16_t sample_slot_attack[16];
+  extern uint16_t sample_slot_hold[16];
   extern uint16_t sample_slot_decay[16];
-  extern uint16_t sample_slot_release[16];
   extern uint8_t sample_slot_level[16];
   extern int8_t sample_slot_filter[16];
   extern uint8_t sample_slot_filter_q[16];
@@ -1032,8 +1049,8 @@ static void sample_slot_copy_settings(uint8_t src, uint8_t dest) {
   sample_slot_pitch[dest] = sample_slot_pitch[src];
   sample_slot_active_pitch[dest] = sample_slot_active_pitch[src];
   sample_slot_attack[dest] = sample_slot_attack[src];
+  sample_slot_hold[dest] = sample_slot_hold[src];
   sample_slot_decay[dest] = sample_slot_decay[src];
-  sample_slot_release[dest] = sample_slot_release[src];
   sample_slot_level[dest] = sample_slot_level[src];
   sample_slot_filter[dest] = sample_slot_filter[src];
   sample_slot_filter_q[dest] = sample_slot_filter_q[src];

@@ -7,14 +7,15 @@
 #include "tusb.h"
 #include "class/cdc/cdc_device.h"
 
-// Fixed little-endian packet, 168 bytes, sent on the USB serial port.
+// Fixed little-endian packet, 174 bytes, sent on the USB serial port.
 // 0..1 'J''D', 2 version, 3 project (1..16), 4 slot, 5 flags, 6 pattern,
 // 7 pitch, 8 cutoff, 9 resonance, 10 volume, 11 frame bytes,
 // 12 usb level u16, 14..18 knob x/y/z u16,
 // 20 size, 24 start, 28 end, 32 playhead (u32 byte offsets into the sample),
 // 36 play slot, 37 step mask u16 for the selected sample on this pattern,
-// 40 sixteen slice starts, 104 sixteen slice ends.
-#define DISPLAY_BYTES 168
+// 40 sixteen slice starts, 104 sixteen slice ends,
+// 168 attack samples u16, 170 hold samples u16, 172 decay samples u16.
+#define DISPLAY_BYTES 174
 #define DISPLAY_PEAKS 200
 #define DISPLAY_PEAK_CHUNK 40
 
@@ -115,7 +116,7 @@ static inline void display_wave_step(uint32_t size, uint32_t frame) {
       failed = true;
       return;
     }
-    if (f_lseek(&fil, WAV_HEADER + pos) != FR_OK) {
+    if (f_lseek(&fil, RESERVE_DATA_OFF + pos) != FR_OK) {
       f_close(&fil);
       failed = true;
       return;
@@ -127,7 +128,10 @@ static inline void display_wave_step(uint32_t size, uint32_t frame) {
   }
 
   uint8_t raw[1024];
-  uint32_t room = sizeof raw;
+  uint32_t bucket_end = (uint32_t)(peak_i + 1) * span;
+  if (bucket_end > size || peak_i + 1 >= DISPLAY_PEAKS) bucket_end = size;
+  uint32_t room = bucket_end > pos ? bucket_end - pos : 0;
+  if (room > sizeof raw) room = sizeof raw;
   if (room > size - pos) room = size - pos;
   room -= room % frame;
   if (!room) {
@@ -152,6 +156,7 @@ static inline void display_wave_step(uint32_t size, uint32_t frame) {
   pos += frames * frame;
   while (peak_i < DISPLAY_PEAKS &&
          (pos >= (uint32_t)(peak_i + 1) * span || pos >= size)) {
+    if (peak_min > peak_max) break;
     ready[ready_n * 2] = peak_min;
     ready[ready_n * 2 + 1] = peak_max;
     ready_n++;
@@ -208,7 +213,7 @@ static inline void display_poll(int adc_x, int adc_y, int adc_z) {
   memset(packet, 0, sizeof packet);
   packet[0] = 'J';
   packet[1] = 'D';
-  packet[2] = 1;
+  packet[2] = 3;
   packet[3] = (uint8_t)(project_bank + 1);
   packet[4] = sample_slot_edit;
   packet[5] = (sample_slot_slice_mode[sample_slot_edit] ? 1u : 0u) |
@@ -248,6 +253,9 @@ static inline void display_poll(int adc_x, int adc_y, int adc_z) {
       steps |= (uint16_t)(1u << n->step);
   }
   put_display_u16(packet + 37, steps);
+  put_display_u16(packet + 168, sample_slot_attack[sample_slot_edit]);
+  put_display_u16(packet + 170, sample_slot_hold[sample_slot_edit]);
+  put_display_u16(packet + 172, sample_slot_decay[sample_slot_edit]);
   display_send(packet, DISPLAY_BYTES);
   display_wave_step(size, frame);
 }

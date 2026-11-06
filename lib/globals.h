@@ -462,6 +462,7 @@ typedef struct SampleSlotVoice {
   uint8_t applied_filter_q;
   bool filter_reset;
   bool filter_dirty;
+  int8_t filter_ramp;
   ResonantFilter filter_l;
   ResonantFilter filter_r;
   uint8_t sample;
@@ -480,8 +481,12 @@ typedef struct SampleSlotVoice {
   FIL fil;
   uint32_t phase;
   uint32_t play_end;
+  uint8_t play_slice;
+  uint8_t pending_slice;
   uint16_t attack_pos;
   uint16_t attack_len;
+  uint16_t hold_pos;
+  uint16_t hold_len;
   uint16_t decay_pos;
   uint16_t decay_len;
   uint16_t release_len;
@@ -513,6 +518,10 @@ typedef struct SampleSlotVoice {
   bool next_need;
   volatile uint16_t pref_r;
   volatile uint16_t pref_w;
+  volatile uint8_t pref_epoch;
+  bool pref_torn;
+  uint32_t stage_phase;
+  uint16_t stage_bytes;
   uint32_t clmt[64];
 } SampleSlotVoice;
 
@@ -538,8 +547,8 @@ uint16_t sample_slot_note_count = 0;
 int8_t sample_slot_pitch[16];
 int8_t sample_slot_active_pitch[16];
 uint16_t sample_slot_attack[16];
+uint16_t sample_slot_hold[16];
 uint16_t sample_slot_decay[16];
-uint16_t sample_slot_release[16];
 uint8_t sample_slot_level[16];
 #define SAMPLE_SLOT_ENV_MAX 22050u
 #define SAMPLE_SLOT_ENV_MIN 64u
@@ -550,6 +559,7 @@ bool sample_slot_slice_end_on[16][16];
 uint32_t sample_slot_slice_start[16][16];
 uint32_t sample_slot_slice_end[16][16];
 uint8_t sample_slot_slice_sel[16];
+uint32_t sample_slot_pitch_settled_at;
 bool sample_slot_region_custom[16];
 bool sample_slot_region_end_on[16];
 uint32_t sample_slot_region_start[16];
@@ -740,7 +750,7 @@ static inline bool sample_slot_live_note(uint8_t pad) {
   n->sample = sample;
   n->step = step;
   n->nudge = 0;
-  n->velocity = sample_slot_level[sample] ? sample_slot_level[sample] : 127;
+  n->velocity = 127;
   n->offset = 0;
   n->filter = sample_slot_filter[sample];
   n->filter_q = sample_slot_filter_q[sample];
@@ -779,7 +789,7 @@ static inline bool sample_slot_note_toggle(uint8_t sample, uint8_t step) {
   n->step = step;
   n->slice = sample_slot_slice_mode[sample] ? sample_slot_slice_sel[sample] : 0;
   n->nudge = 0;
-  n->velocity = sample_slot_level[sample] ? sample_slot_level[sample] : 127;
+  n->velocity = 127;
   n->offset = 0;
   n->pitch = sample_slot_active_pitch[sample];
   n->filter = sample_slot_filter[sample];
@@ -802,45 +812,40 @@ static inline int sample_slot_claim(uint8_t slot) {
   if (sample_slot_ord(slot) < 0) return -1;
   for (uint8_t i = 0; i < SAMPLE_SLOT_VOICES; i++) {
     SampleSlotVoice *v = &sample_slot_voice[i];
-    if (v->sample == slot &&
-        (v->open || v->restart || (v->fil.obj.fs && v->file_sample == slot)))
-      return i;
-  }
-  for (uint8_t i = 0; i < SAMPLE_SLOT_VOICES; i++) {
-    if (!sample_slot_voice[i].open && !sample_slot_voice[i].restart) return i;
+    if (v->sample == slot && v->open && !v->cue) return i;
   }
   for (uint8_t i = 0; i < SAMPLE_SLOT_VOICES; i++) {
     SampleSlotVoice *v = &sample_slot_voice[i];
-    if (v->sample == slot && v->cue) return i;
+    if (v->sample == slot && v->restart && !v->open && !v->cue) return i;
+  }
+  for (uint8_t i = 0; i < SAMPLE_SLOT_VOICES; i++) {
+    SampleSlotVoice *v = &sample_slot_voice[i];
+    if (!v->open && !v->restart && !v->cue) return i;
+  }
+  for (uint8_t i = 0; i < SAMPLE_SLOT_VOICES; i++) {
+    SampleSlotVoice *v = &sample_slot_voice[i];
+    if (v->cue && v->sample == slot) return i;
+  }
+  for (uint8_t i = 0; i < SAMPLE_SLOT_VOICES; i++) {
+    if (sample_slot_voice[i].cue) return i;
   }
   uint8_t oldest = 0;
-  for (uint8_t i = 1; i < SAMPLE_SLOT_VOICES; i++)
-    if (sample_slot_voice[i].started < sample_slot_voice[oldest].started)
+  bool found = false;
+  for (uint8_t i = 0; i < SAMPLE_SLOT_VOICES; i++) {
+    SampleSlotVoice *v = &sample_slot_voice[i];
+    if (!v->open || v->cue) continue;
+    if (!found || v->started < sample_slot_voice[oldest].started) {
       oldest = i;
-  return oldest;
+      found = true;
+    }
+  }
+  return found ? oldest : 0;
 }
 
 static inline void sample_slot_trigger_voice(uint8_t voice, uint8_t slot,
                                              uint32_t phase) {
   if (voice >= SAMPLE_SLOT_VOICES || sample_slot_ord(slot) < 0) return;
   SampleSlotVoice *v = &sample_slot_voice[voice];
-  bool crowded = true;
-  for (uint8_t i = 0; i < SAMPLE_SLOT_VOICES; i++) {
-    if (i == voice) continue;
-    SampleSlotVoice *o = &sample_slot_voice[i];
-    if (!o->open && !o->restart && !o->cue) crowded = false;
-  }
-  if (crowded && v->open && !v->cue) {
-    v->pref_drop = true;
-    v->open = false;
-    v->restart = false;
-    v->seek = false;
-    v->kill = false;
-    v->defer_restart = false;
-    v->steal_after = false;
-    v->release_left = 0;
-    return;
-  }
   for (uint8_t i = 0; i < SAMPLE_SLOT_VOICES; i++) {
     if (i == voice) continue;
     SampleSlotVoice *o = &sample_slot_voice[i];
@@ -862,11 +867,11 @@ static inline void sample_slot_trigger_voice(uint8_t voice, uint8_t slot,
   v->cue = false;
   v->filter_reset = true;
   v->attack_pos = 0;
+  v->hold_pos = 0;
   v->decay_pos = 0;
   v->attack_len = sample_slot_attack[slot];
+  v->hold_len = sample_slot_hold[slot];
   v->decay_len = sample_slot_decay[slot];
-  v->release_len = sample_slot_release[slot] ? sample_slot_release[slot]
-                                            : SAMPLE_SLOT_ENV_MIN;
   v->started = ++sample_slot_stamp;
   bool overlapped = false;
   for (uint8_t i = 0; i < SAMPLE_SLOT_VOICES; i++) {
@@ -885,8 +890,29 @@ static inline void sample_slot_trigger_voice(uint8_t voice, uint8_t slot,
     return;
   }
   if (v->open && v->file_sample == slot) {
-    v->filter_reset = false;
+    bool ended = (v->play_end && v->phase >= v->play_end) ||
+                 (!v->play_end && (v->kill || v->pref_eof));
+    bool ring_empty = v->pref_w == v->pref_r;
+    if (v->seek || ended || ring_empty) {
+      v->phase = phase;
+      v->defer_restart = false;
+      v->release_left = 0;
+      v->stage_bytes = 0;
+      v->kill = false;
+      v->restart = false;
+      v->seek = true;
+      v->primed = false;
+      v->have_ahead = false;
+      v->hold_l = 0;
+      v->hold_r = 0;
+      return;
+    }
     v->pending_phase = phase;
+    if (v->defer_restart) {
+      v->stage_bytes = 0;
+      return;
+    }
+    v->filter_reset = false;
     v->defer_restart = true;
     v->release_len = SAMPLE_SLOT_XFADE;
     v->release_left = SAMPLE_SLOT_XFADE;
@@ -898,6 +924,7 @@ static inline void sample_slot_trigger_voice(uint8_t voice, uint8_t slot,
   v->phase = phase;
   v->card_after = 0;
   v->kill = false;
+  v->stage_bytes = 0;
   v->restart = true;
   v->primed = false;
   v->have_ahead = false;
@@ -910,7 +937,6 @@ static inline void sample_slot_trigger_voice(uint8_t voice, uint8_t slot,
 }
 
 static inline void sample_slot_arm_velocity(SampleSlotVoice *v, uint8_t velocity) {
-  if (!velocity) velocity = 127;
   if (v->defer_restart) {
     v->pending_velocity = velocity;
     return;
@@ -1038,6 +1064,9 @@ static inline uint32_t sample_slot_zero_snap(uint8_t slot, uint32_t pos,
   return (uint32_t)best;
 }
 
+static inline void sample_slot_live_end(uint8_t slot, bool slice_mode,
+                                        uint8_t slice, uint32_t end);
+
 static inline void sample_slot_set_bound(uint8_t slot, bool is_end,
                                         uint16_t adc) {
   uint32_t size, frame, start, end;
@@ -1087,12 +1116,8 @@ static inline void sample_slot_set_bound(uint8_t slot, bool is_end,
     sample_slot_region_custom[slot] = true;
     sample_slot_region_start[slot] = start;
   }
-  if (is_end) {
-    for (uint8_t voice = 0; voice < SAMPLE_SLOT_VOICES; voice++) {
-      if (sample_slot_voice[voice].sample == slot)
-        sample_slot_voice[voice].play_end = end;
-    }
-  }
+  if (is_end)
+    sample_slot_live_end(slot, slice_mode, slice, end);
   project_mark();
 }
 
@@ -1154,13 +1179,20 @@ static inline void sample_slot_fine_bound(uint8_t slot, bool is_end,
     sample_slot_region_custom[slot] = true;
     sample_slot_region_start[slot] = start;
   }
-  if (is_end) {
-    for (uint8_t voice = 0; voice < SAMPLE_SLOT_VOICES; voice++) {
-      if (sample_slot_voice[voice].sample == slot)
-        sample_slot_voice[voice].play_end = end;
-    }
-  }
+  if (is_end)
+    sample_slot_live_end(slot, slice_mode, slice, end);
   project_mark();
+}
+
+static inline void sample_slot_live_end(uint8_t slot, bool slice_mode,
+                                        uint8_t slice, uint32_t end) {
+  uint8_t id = slice_mode ? slice : 0xff;
+  for (uint8_t voice = 0; voice < SAMPLE_SLOT_VOICES; voice++) {
+    SampleSlotVoice *v = &sample_slot_voice[voice];
+    if (v->sample != slot) continue;
+    if (v->play_slice == id) v->play_end = end;
+    if (v->defer_restart && v->pending_slice == id) v->pending_end = end;
+  }
 }
 
 static inline void sample_slot_preview(uint8_t slot, uint8_t pad, bool fade_in) {
@@ -1191,11 +1223,16 @@ static inline void sample_slot_preview(uint8_t slot, uint8_t pad, bool fade_in) 
   v->play_filter_glide = false;
   v->filter_dirty = true;
   sample_slot_trigger_voice((uint8_t)voice, slot, phase);
-  sample_slot_arm_velocity(v, sample_slot_level[slot]);
-  if (sample_slot_voice[voice].defer_restart)
+  sample_slot_arm_velocity(v, 127);
+  if (sample_slot_voice[voice].defer_restart) {
     sample_slot_voice[voice].pending_end = end;
-  else
+    sample_slot_voice[voice].pending_slice =
+        sample_slot_slice_mode[slot] ? pad : 0xff;
+  } else {
     sample_slot_voice[voice].play_end = end;
+    sample_slot_voice[voice].play_slice =
+        sample_slot_slice_mode[slot] ? pad : 0xff;
+  }
   if (fade_in) {
     sample_slot_voice[voice].attack_len = 352;
     sample_slot_voice[voice].attack_pos = 0;
@@ -1220,11 +1257,26 @@ static inline void sample_slot_preview_end(uint8_t slot) {
   v->play_filter_glide = false;
   v->filter_dirty = true;
   sample_slot_trigger_voice((uint8_t)voice, slot, from);
-  sample_slot_arm_velocity(v, sample_slot_level[slot]);
-  if (sample_slot_voice[voice].defer_restart)
+  sample_slot_arm_velocity(v, 127);
+  if (sample_slot_voice[voice].defer_restart) {
     sample_slot_voice[voice].pending_end = end;
-  else
+    sample_slot_voice[voice].pending_slice =
+        sample_slot_slice_mode[slot] ? slice : 0xff;
+  } else {
     sample_slot_voice[voice].play_end = end;
+    sample_slot_voice[voice].play_slice =
+        sample_slot_slice_mode[slot] ? slice : 0xff;
+  }
+}
+
+static inline void sample_slot_filter_notes(uint8_t sample) {
+  if (sample > 15) return;
+  for (uint16_t i = 0; i < sample_slot_note_count; i++) {
+    SampleSlotNote *n = &sample_slot_notes[i];
+    if (n->sample != sample) continue;
+    n->filter = sample_slot_filter[sample];
+    n->filter_q = sample_slot_filter_q[sample];
+  }
 }
 
 static inline void sample_slot_fire_note(const SampleSlotNote *note) {
@@ -1240,16 +1292,21 @@ static inline void sample_slot_fire_note(const SampleSlotNote *note) {
   if (note->sample < 16 && note->sample != sample_slot_edit)
     sample_slot_led_flash_until[note->sample] = time_us_32() + 50000u;
   v->play_pitch = note->pitch;
-  v->play_filter = note->filter;
-  v->play_filter_q = note->filter_q;
+  v->play_filter = sample_slot_filter[note->sample];
+  v->play_filter_q = sample_slot_filter_q[note->sample];
   v->play_filter_glide = false;
   v->filter_dirty = true;
   sample_slot_trigger_voice((uint8_t)voice, note->sample, phase);
   sample_slot_arm_velocity(v, note->velocity);
-  if (sample_slot_voice[voice].defer_restart)
+  if (sample_slot_voice[voice].defer_restart) {
     sample_slot_voice[voice].pending_end = end;
-  else
+    sample_slot_voice[voice].pending_slice =
+        sample_slot_slice_mode[note->sample] ? note->slice : 0xff;
+  } else {
     sample_slot_voice[voice].play_end = end;
+    sample_slot_voice[voice].play_slice =
+        sample_slot_slice_mode[note->sample] ? note->slice : 0xff;
+  }
 }
 
 static inline void sample_slot_fire_step(uint8_t step, bool nudged) {
@@ -1290,9 +1347,8 @@ static inline void sample_slot_silence(void) {
     if (v->open) {
       v->kill = true;
       if (!v->release_left) {
-        uint16_t rel = sample_slot_release[v->sample];
-        v->release_len = rel ? rel : SAMPLE_SLOT_ENV_MIN;
-        v->release_left = v->release_len;
+        v->release_len = SAMPLE_SLOT_XFADE;
+        v->release_left = SAMPLE_SLOT_XFADE;
       }
     } else {
       v->kill = true;
