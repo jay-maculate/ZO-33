@@ -92,9 +92,9 @@ Resonance: Hold C and turn the Z knob.
 
 Attack: Hold C and turn the X knob.
 
-Decay: Hold C and turn the Y knob.
+Hold: Hold C and turn the Y knob.
 
-Release: Hold C and turn the Z knob.
+Decay: Hold C and turn the Z knob.
 
 Level: Hold D and turn the X knob.
 
